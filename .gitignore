@@ -1,0 +1,128 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+!static/js/editor/build/
+venv/
+.venv/
+*.egg
+
+# Environment
+.env*
+!.env.example
+# Local uv lockfile (optional, per-platform — see "Faster installs with uv" in README)
+requirements.lock
+
+# Local environment secrets and all editor/decryption variants stay local.
+secrets.env
+secrets.env.*
+!secrets.env.example
+
+# Data — all user data stays local
+data/
+!services/hwfit/data/
+!services/hwfit/data/hf_models.json
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Node
+node_modules/
+services/node_modules/
+services/data/
+
+# IDE / Editor
+.aider*
+.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test capture artifacts (browser session dumps may contain personal content)
+.playwright-mcp/
+/scratch/
+
+# Host Bridge authentication tokens are generated locally.
+.host_bridge_token
+host_bridge_token.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.cache
+cache/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/schemas/
+output.txt.txt
+
+# Media (uploaded/generated)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.webp
+*.tiff
+*.pdf
+
+# …except shipped static assets
+!static/icons/*.png
+!desktop/src-tauri/icons/
+!desktop/src-tauri/icons/*.png
+
+# …except shipped demo assets in docs/ that the README links to.
+!docs/*.jpg
+!docs/*.jpeg
+!docs/*.png
+!docs/*.gif
+!docs/*.webp
+# …and curated docs/ subfolder assets (e.g. accessibility before/after shots).
+!docs/**/*.png
+!docs/**/*.jpg
+!docs/**/*.gif
+!docs/**/*.webp
+
+# …except shipped website and branding media.
+!website/**/*.jpg
+!website/**/*.jpeg
+!website/**/*.png
+!website/**/*.gif
+!website/**/*.bmp
+!website/**/*.webp
+!website/**/*.tiff
+!website/**/*.pdf
+!assets/branding/**/*.jpg
+!assets/branding/**/*.jpeg
+!assets/branding/**/*.png
+!assets/branding/**/*.gif
+!assets/branding/**/*.bmp
+!assets/branding/**/*.webp
+!assets/branding/**/*.tiff
+!assets/branding/**/*.pdf
+
+# Reports and temp files
+reports/
+tasks/
+scripts/compound/*.json
+research_data/
+**/search_analytics.json
+
+# Internal dev/review notes — not for public repo
+dev-docs/
+# Windows-port working docs (local only, not for public repo)
+docs/windows-port/
+
+# Local config
+compound.config.json
+*.error.log
+_scratch/
+/odysseus/

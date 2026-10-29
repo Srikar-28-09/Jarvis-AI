@@ -1,0 +1,7 @@
+# Local CPU-capable speech recognition. CUDA remains an optional runtime
+# capability; the Odysseus Docker image uses CPU INT8 unless GPU access and
+# matching CUDA/cuDNN libraries are explicitly provided.
+faster-whisper
+# Faster-Whisper 1.2.1 calls av.open(..., metadata_errors=...), removed in
+# PyAV 19. Keep the compatible PyAV 18 line until the upstream fix is released.
+av<19

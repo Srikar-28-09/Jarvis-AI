@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Odysseus Voice</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main id="overlay" class="overlay" aria-label="Odysseus voice assistant">
+      <header class="topbar">
+        <span class="wordmark"><span class="status-dot" id="status-dot"></span> ODYSSEUS</span>
+        <button id="dismiss" class="icon-button" aria-label="Dismiss overlay (Escape)" title="Dismiss">×</button>
+      </header>
+      <section class="hero" aria-live="polite">
+        <div class="hud" aria-hidden="true">
+          <svg class="hud-rings" viewBox="0 0 240 240">
+            <circle class="ring ring-outer" cx="120" cy="120" r="108" />
+            <circle class="ring ring-dash" cx="120" cy="120" r="96" />
+            <circle class="ring ring-middle" cx="120" cy="120" r="82" />
+            <circle class="ring ring-inner" cx="120" cy="120" r="68" />
+            <path class="ring arc arc-one" d="M120 12a108 108 0 0 1 88 45" />
+            <path class="ring arc arc-two" d="M31 166a102 102 0 0 1-14-46" />
+            <path class="ring arc arc-three" d="M200 176a94 94 0 0 1-51 35" />
+            <g class="ticks">
+              <path d="M120 4v9M120 227v9M4 120h9M227 120h9" />
+              <path d="m38 38 7 7m150 150 7 7M202 38l-7 7M45 195l-7 7" />
+              <path d="M120 19v5M120 216v5M19 120h5M216 120h5" />
+            </g>
+          </svg>
+          <span class="hud-label hud-label-top">ODYSSEUS <i>CORE</i></span>
+          <span class="hud-label hud-label-bottom"><i class="live-dot"></i> AUDIO LINK <b>READY</b></span>
+          <button id="orb" class="orb" aria-label="Interrupt speech or start listening">
+            <span class="orb-halo"></span><span class="orb-core"></span><span class="orb-light"></span>
+          </button>
+        </div>
+        <div class="status" id="state-label">Ready</div>
+        <div class="message" id="transcript" aria-label="Recognized request"></div>
+        <div class="response" id="response" aria-label="Latest response"></div>
+        <div class="error" id="error" role="alert"></div>
+      </section>
+      <form id="composer" class="composer">
+        <input id="message" autocomplete="off" aria-label="Type a message" placeholder="Speak or type a message…" />
+        <button id="send" class="send-button" aria-label="Send message">↑</button>
+      </form>
+      <footer class="controls">
+        <button id="mic" class="mic-button" aria-label="Start listening"><span class="mic-glyph">●</span><span id="mic-label">Start listening</span></button>
+        <span id="shortcut-hint" class="shortcut">ALT + L <i>to open</i></span>
+      </footer>
+    </main>
+    <section id="login" class="login-panel" hidden>
+      <div class="login-brand">ODYSSEUS <span>VOICE</span></div>
+      <h1>Connect to your assistant</h1>
+      <label>Backend address<input id="backend" value="http://127.0.0.1:7000" spellcheck="false" /></label>
+      <label>Username<input id="username" autocomplete="username" /></label>
+      <label>Password<input id="password" type="password" autocomplete="current-password" /></label>
+      <label id="totp-wrap" hidden>Authenticator code<input id="totp" inputmode="numeric" autocomplete="one-time-code" /></label>
+      <button id="login-button">Sign in</button>
+      <p id="login-error" role="alert"></p>
+    </section>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

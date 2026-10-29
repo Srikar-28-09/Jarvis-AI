@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+if [ -x "$ROOT/src-tauri/target/release/odysseus-voice" ]; then
+  exec "$ROOT/src-tauri/target/release/odysseus-voice" "$@"
+fi
+if [ -x "$ROOT/src-tauri/target/debug/odysseus-voice" ]; then
+  exec "$ROOT/src-tauri/target/debug/odysseus-voice" "$@"
+fi
+echo "Odysseus Voice is not built. Run 'npm run tauri build' from $ROOT first." >&2
+exit 1

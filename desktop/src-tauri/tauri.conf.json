@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Odysseus Voice",
+  "version": "0.1.0",
+  "identifier": "dev.odysseus.voice",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Odysseus Voice",
+        "width": 410,
+        "height": 500,
+        "minWidth": 360,
+        "minHeight": 470,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": true
+      }
+    ],
+    "security": { "csp": "default-src 'self' asset:; img-src 'self' asset: data:; media-src blob:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost http://localhost:1420" }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Odysseus voice assistant overlay"
+  },
+  "plugins": { "global-shortcut": null }
+}

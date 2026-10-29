@@ -1,0 +1,15 @@
+[Unit]
+Description=Odysseus authenticated Host Bridge
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Projects/odysseus
+ExecStart=%h/Projects/odysseus/.venv/bin/python %h/Projects/odysseus/run_host_bridge.py
+Restart=on-failure
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

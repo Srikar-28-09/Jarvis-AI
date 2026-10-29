@@ -1,0 +1,86 @@
+* { box-sizing: border-box; }
+:root { color-scheme: dark; font: 13px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; color: #e7fbff; background: transparent; }
+body { margin: 0; min-height: 100vh; background: transparent; }
+button, input { font: inherit; }
+.overlay, .login-panel {
+  width: min(100vw, 410px); min-height: 430px; margin: 0 auto; padding: 18px 22px 16px; overflow: hidden;
+  border: 1px solid rgba(117, 220, 235, .22); border-radius: 25px;
+  background: radial-gradient(ellipse at 50% 35%, rgba(11, 112, 132, .2), transparent 52%),
+    radial-gradient(ellipse at 85% 3%, rgba(102, 58, 135, .13), transparent 40%), rgba(5, 13, 21, .96);
+  box-shadow: 0 24px 72px rgba(0,0,0,.48), inset 0 1px rgba(189, 245, 255, .08), 0 0 32px rgba(23, 161, 178, .08);
+  backdrop-filter: blur(28px);
+}
+.topbar, .controls { display:flex; align-items:center; justify-content:space-between; }
+.wordmark { display:flex; align-items:center; gap:9px; color:#a8cbd1; font-size:10px; font-weight:700; letter-spacing:.2em; }
+.status-dot { width:6px; height:6px; border-radius:50%; background:#58d5dc; color:#58d5dc; box-shadow:0 0 10px currentColor; }
+.icon-button { border:0; padding:0 4px; color:#82a5ad; background:transparent; font-size:24px; cursor:pointer; }
+.hero { min-height:314px; display:flex; flex-direction:column; align-items:center; justify-content:flex-start; padding-top:1px; text-align:center; }
+.hud { width:198px; height:194px; position:relative; display:grid; place-items:center; margin:0 0 2px; }
+.hud-rings { position:absolute; inset:0; width:100%; height:100%; overflow:visible; }
+.ring { fill:none; stroke:rgba(99, 199, 211, .16); stroke-width:1; }
+.ring-dash { stroke:rgba(95, 203, 215, .38); stroke-dasharray:1 5; stroke-width:1.5; transform-origin:120px 120px; }
+.ring-middle { stroke:rgba(83, 206, 218, .28); stroke-dasharray:52 7 2 7; stroke-width:1.2; }
+.ring-inner { stroke:rgba(126, 227, 235, .24); stroke-dasharray:2 6; }
+.arc { stroke:#60e7ec; stroke-width:2.2; stroke-linecap:round; filter:drop-shadow(0 0 4px rgba(65, 227, 235, .7)); }
+.arc-two { stroke:#9c8aff; stroke-width:1.8; }
+.arc-three { stroke:#ffad70; stroke-width:1.8; }
+.ticks { fill:none; stroke:rgba(139, 226, 234, .55); stroke-width:1.2; stroke-linecap:round; }
+.hud-label { position:absolute; z-index:2; color:#64858d; font:600 7px/1.2 ui-monospace, SFMono-Regular, monospace; letter-spacing:.18em; }
+.hud-label i { color:#83e9ed; font-style:normal; }
+.hud-label-top { top:19px; }
+.hud-label-bottom { bottom:20px; display:flex; align-items:center; gap:6px; }
+.hud-label-bottom b { color:#dda16f; font-weight:600; }
+.live-dot { width:4px; height:4px; display:inline-block; border-radius:50%; background:#69e2dd; box-shadow:0 0 6px #69e2dd; }
+.orb { position:relative; z-index:1; width:102px; height:102px; border:0; border-radius:50%; background:transparent; cursor:pointer; isolation:isolate; }
+.orb-halo { position:absolute; inset:-2px; border-radius:50%; background:conic-gradient(from 20deg,rgba(255,172,104,.8),rgba(154,117,255,.8),rgba(69,225,228,.92),rgba(255,172,104,.8)); filter:blur(15px); opacity:.28; transition:opacity .3s ease; }
+.orb-core { position:absolute; inset:10px; border:1px solid rgba(144, 250, 249, .55); border-radius:50%; background:
+  radial-gradient(circle at 34% 28%,rgba(255,255,255,.84),transparent 5%),
+  radial-gradient(ellipse at 35% 29%,#71e7e2 0,#287f8c 22%,#15384d 49%,#152438 70%,#0b1724 100%);
+  box-shadow:inset -9px -12px 23px rgba(1,9,20,.72),inset 2px 2px 12px rgba(203,255,255,.32),0 0 24px rgba(46,206,216,.18);
+  transform:scale(.9); transition:transform .35s ease;
+}
+.orb-light { position:absolute; z-index:2; left:50%; top:50%; width:4px; height:4px; border-radius:50%; background:#d2ffff; box-shadow:0 0 9px 3px #55e9ef; transform:translate(-50%,-50%); }
+.orb:focus-visible { outline:2px solid #75e8ed; outline-offset:8px; }
+.status { min-height:21px; color:#c0e1e5; font-size:11px; letter-spacing:.1em; text-transform:uppercase; }
+.message { max-width:345px; max-height:36px; overflow:hidden; color:#73939b; font-size:11px; margin-top:7px; }
+.response { max-width:345px; max-height:53px; overflow:auto; color:#e4fbff; font-size:13px; font-weight:500; margin-top:6px; }
+.error { max-width:345px; margin-top:7px; color:#ffbd98; font-size:10px; }
+.composer { display:flex; align-items:center; gap:8px; height:43px; padding:4px 5px 4px 14px; border:1px solid rgba(113, 206, 219, .2); border-radius:13px; background:rgba(16, 45, 54, .36); }
+.composer:focus-within { border-color:rgba(92, 227, 234, .55); box-shadow:0 0 17px rgba(56, 189, 205, .08); }
+.composer input { min-width:0; flex:1; border:0; outline:0; color:#e7fbff; background:transparent; font-size:12px; }
+.composer input::placeholder { color:#68838a; }
+.send-button { width:32px; height:32px; border:1px solid rgba(119, 242, 239, .28); border-radius:10px; color:#dfffff; background:linear-gradient(145deg,rgba(28, 154, 163, .8),rgba(69, 94, 154, .76)); cursor:pointer; font-size:18px; }
+.controls { padding:13px 2px 0; }
+.mic-button { display:flex; align-items:center; gap:9px; border:0; color:#b7d9dd; background:transparent; padding:4px 0; cursor:pointer; font-size:11px; }
+.mic-glyph { display:grid; place-items:center; width:23px; height:23px; border:1px solid rgba(109, 217, 224, .3); border-radius:50%; color:#75e9e5; font-size:9px; }
+.shortcut { max-width:250px; color:#66828a; font-size:9px; line-height:1.35; letter-spacing:.12em; text-align:right; }
+.shortcut i { margin-left:4px; font-style:normal; letter-spacing:0; }
+.overlay[data-state="listening"] .status-dot { color:#57e5dc; background:#57e5dc; }
+.overlay[data-state="listening"] .orb-halo { opacity:.7; animation:halo 2.4s ease-in-out infinite; }
+.overlay[data-state="listening"] .orb-core { transform:scale(.96); animation:breathe 2.2s ease-in-out infinite; }
+.overlay[data-state="listening"] .ring-middle { stroke:#58dce2; animation:spin 13s linear infinite; }
+.overlay[data-state="thinking"] .status-dot { color:#ad91ff; background:#ad91ff; }
+.overlay[data-state="thinking"] .orb-halo { opacity:.72; animation:spin 4s linear infinite; }
+.overlay[data-state="thinking"] .ring-dash { animation:spin 9s linear infinite reverse; }
+.overlay[data-state="synthesizing"] .status-dot { color:#62dfe3; background:#62dfe3; }
+.overlay[data-state="synthesizing"] .ring-dash { animation:spin 26s linear infinite; }
+.overlay[data-state="synthesizing"] .orb-halo { opacity:.48; }
+.overlay[data-state="speaking"] .status-dot { color:#ffab70; background:#ffab70; }
+.overlay[data-state="speaking"] .orb-core { animation:breathe 1.25s ease-in-out infinite; }
+.overlay[data-state="speaking"] .arc { stroke:#ffbd83; }
+.overlay[data-state="interrupted"] .status-dot { color:#ffbd77; background:#ffbd77; }
+.overlay[data-state="error"] .status-dot { color:#ff8b8b; background:#ff8b8b; }
+@keyframes halo { 50% { transform:scale(1.2); opacity:.42; } }
+@keyframes breathe { 50% { transform:scale(1); } }
+@keyframes spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; scroll-behavior:auto !important; } }
+.login-panel { min-height:0; margin-top:22px; padding:28px; }
+.login-brand { color:#d4f7fa; letter-spacing:.2em; font-size:10px; font-weight:700; }
+.login-brand span { color:#76dfe3; }
+.login-panel h1 { margin:24px 0; font-size:20px; font-weight:550; }
+.login-panel label { display:block; margin:13px 0; color:#a6c4c9; font-size:11px; }
+.login-panel label input { display:block; width:100%; height:39px; margin-top:6px; padding:0 11px; border:1px solid rgba(116, 210, 220, .2); border-radius:11px; outline:none; color:#e7fbff; background:rgba(0,0,0,.18); }
+.login-panel label input:focus { border-color:#69dfe5; }
+#login-button { width:100%; height:42px; margin-top:10px; border:1px solid rgba(119,242,239,.25); border-radius:12px; color:#efffff; background:linear-gradient(110deg,#188f9d,#675ba8); cursor:pointer; }
+#login-error { min-height:20px; color:#ffbd98; font-size:11px; }
+[hidden] { display:none !important; }
