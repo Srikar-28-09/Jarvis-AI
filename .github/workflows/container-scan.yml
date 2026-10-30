@@ -49,4 +49,5 @@ jobs:
           # image. Debian purges old package versions from its repos, so a
           # pinned version breaks future rebuilds. The base image itself is
           # what should be pinned (tracked by Dependabot's docker ecosystem).
-          ignore: DL3008
+          # DL3059 is informational: keep RUN layers separate for Docker cache clarity.
+          ignore: DL3008,DL3059
