@@ -53,7 +53,7 @@ def _padding_left(block: str) -> float | None:
 
 def _breakpoints() -> list[tuple[float, int, int]]:
     """(padding-left, window start, window end) for each declared breakpoint."""
-    threads = _blocks(THREAD)
+    threads = [(pos, block) for pos, block in _blocks(THREAD) if _padding_left(block) is not None]
     assert threads, "no .agent-thread rule found"
     bounds = [pos for pos, _ in threads] + [len(CSS)]
     return [

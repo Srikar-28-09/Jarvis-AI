@@ -868,7 +868,9 @@ def setup_chat_routes(
             and not tool_policy.block_all_tool_calls
         ):
             sess.add_message(ChatMessage("user", message))
-            chat_handler.update_session_name_if_needed(sess, message)
+            update_name = getattr(chat_handler, "update_session_name_if_needed", None)
+            if callable(update_name):
+                update_name(sess, message)
             from routes.chat_helpers import fire_message_event
             fire_message_event(request, webhook_manager, session, sess, message)
             sess.add_message(ChatMessage(
@@ -1610,7 +1612,9 @@ def setup_chat_routes(
             async def _simple_response_stream() -> AsyncGenerator[str, None]:
                 started = time.perf_counter()
                 sess.add_message(ChatMessage("user", message))
-                chat_handler.update_session_name_if_needed(sess, message)
+                update_name = getattr(chat_handler, "update_session_name_if_needed", None)
+                if callable(update_name):
+                    update_name(sess, message)
                 from routes.chat_helpers import fire_message_event
                 fire_message_event(request, webhook_manager, session, sess, message, compare_mode=False)
                 yield f'data: {json.dumps({"type": "model_info", "model": sess.model})}\n\n'

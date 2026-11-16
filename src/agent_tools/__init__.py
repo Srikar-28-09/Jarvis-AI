@@ -29,6 +29,9 @@ from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListMode
 from .bg_job_tools import ManageBgJobsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .notification_tools import SendNotificationTool, ScheduleReminderTool
+# Keep the submodule available as a package attribute even when the facade is
+# reloaded while the submodule itself is still cached.
+from . import computer_control_tools as computer_control_tools
 from .computer_control_tools import (
     ListDirectoryTool, CreateDirectoryTool,
     OpenApplicationTool, OpenUrlTool, TakeScreenshotTool,

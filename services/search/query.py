@@ -118,7 +118,10 @@ def enhance_query(original_query: str) -> Tuple[str, Optional[str]]:
 
 def build_enhanced_query(query: str, time_filter: str = None) -> str:
     """Build an enhanced search query with optional time filtering."""
-    enhanced_query, _ = enhance_query(query)
+    # Tool calls can provide decoded JSON values; keep this public helper total
+    # for those inputs while preserving normal string behavior.
+    query_text = query if isinstance(query, str) else str(query or "")
+    enhanced_query, _ = enhance_query(query_text)
 
     if time_filter:
         time_map = {"day": "d", "week": "w", "month": "m", "year": "y"}
@@ -126,7 +129,7 @@ def build_enhanced_query(query: str, time_filter: str = None) -> str:
             enhanced_query = f"{enhanced_query} after:{time_map[time_filter]}"
             logger.info(f"Added time filter '{time_filter}' to query")
 
-    logger.info("Enhanced web query input_chars=%s output_chars=%s", len(query), len(enhanced_query))
+    logger.info("Enhanced web query input_chars=%s output_chars=%s", len(query_text), len(enhanced_query))
     return enhanced_query
 
 

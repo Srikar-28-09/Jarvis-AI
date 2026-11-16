@@ -11,7 +11,10 @@
 # for setup details.
 services:
   odysseus:
-    build: .
+    build:
+      context: .
+      args:
+        INSTALL_STT: "true"
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
@@ -27,6 +30,7 @@ services:
       # land under /app/.local for the odysseus user. Persist them so a
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
+      - ${JARVIS_WORKSPACE_DIR:-../JarvisWorkspace}:/workspace/jarvis
     extra_hosts:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.
@@ -189,3 +193,11 @@ volumes:
   searxng-data:
   chromadb-data:
   ntfy-cache:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: ${ODYSSEUS_SUBNET:-172.28.10.0/24}

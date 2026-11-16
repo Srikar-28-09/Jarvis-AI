@@ -667,9 +667,9 @@ import { createChatBusyState } from './chatBusyState.mjs';
     isStreaming = !!active;
     currentAbort = active ? active.abortCtrl : null;
     currentHolder = active ? active.holder : null;
-    const busyOwner = active?.requestExecutionId || _currentSendRequestId;
+    const busyOwner = active?.requestExecutionId || (typeof _currentSendRequestId !== 'undefined' ? _currentSendRequestId : null);
     if (active || _sendInFlight) _setForegroundChatBusy(true, busyOwner || 'active-stream');
-    else _setForegroundChatBusy(false, _foregroundBusyState.ownerId(), outcome);
+    else _setForegroundChatBusy(false, (typeof _foregroundBusyState !== 'undefined' ? _foregroundBusyState.ownerId() : null), outcome);
     return active;
   }
 
@@ -1310,7 +1310,7 @@ import { createChatBusyState } from './chatBusyState.mjs';
       }
       _sendInFlight = false;
       _syncForegroundStreamGlobals();
-      if (_currentSendRequestId === requestExecutionId) _currentSendRequestId = null;
+      if (typeof _currentSendRequestId !== 'undefined' && _currentSendRequestId === (typeof requestExecutionId !== 'undefined' ? requestExecutionId : null)) _currentSendRequestId = null;
       if (_earlyMessageInput) _earlyMessageInput.disabled = false;
       if (submitBtn) submitBtn.classList.remove('send-pending');
     };
@@ -2140,7 +2140,7 @@ import { createChatBusyState } from './chatBusyState.mjs';
       if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(_serverRequestId)) {
         requestExecutionId = _serverRequestId;
         window.__odysseusCurrentRequestId = _serverRequestId;
-        if (voiceTurn) window.__odysseusVoiceRequestId = _serverRequestId;
+        if (typeof voiceTurn !== 'undefined' && voiceTurn) window.__odysseusVoiceRequestId = _serverRequestId;
       }
       _sendPerf.mark('chat_stream_headers');
       _sendPerf.report('headers_received');
@@ -2181,13 +2181,13 @@ import { createChatBusyState } from './chatBusyState.mjs';
           }
         }
         typewriterInto(holder.querySelector('.body'), errText);
-        if (voiceTurn) window._setVoiceStatus?.('failed', errText);
+        if (typeof voiceTurn !== 'undefined' && voiceTurn) window._setVoiceStatus?.('failed', errText);
         enableResearchBtn();
         return;
       }
       const streamRunId = res.headers.get('X-Odysseus-Run-Id') || '';
       if (streamRunId) _rememberStreamRunId(streamSessionId, streamRunId, streamGeneration);
-      if (voiceTurn) {
+      if (typeof voiceTurn !== 'undefined' && voiceTurn) {
         window.__odysseusVoiceExecutionId = streamRunId || window.__odysseusVoiceRequestId || '';
         window._setVoiceStatus?.('thinking', 'Thinking…', window.__odysseusVoiceExecutionId);
       }
@@ -4698,8 +4698,12 @@ import { createChatBusyState } from './chatBusyState.mjs';
         // currentAbort while _sendInFlight is already false, reopening the
         // send gate mid-preflight. The replacement syncs when it registers
         // or finishes.
-        _syncForegroundStreamGlobals(requestTerminalOutcome);
-        if (_currentSendRequestId === requestExecutionId) _currentSendRequestId = null;
+        _syncForegroundStreamGlobals(
+          typeof requestTerminalOutcome !== 'undefined'
+            ? requestTerminalOutcome
+            : 'completed'
+        );
+        if (typeof _currentSendRequestId !== 'undefined' && _currentSendRequestId === (typeof requestExecutionId !== 'undefined' ? requestExecutionId : null)) _currentSendRequestId = null;
       }
       // Streaming done — let screen readers announce the settled response.
       if (_ownsStreamState) {

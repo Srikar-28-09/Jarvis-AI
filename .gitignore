@@ -11,6 +11,7 @@ venv/
 *.egg
 
 # Environment
+.env
 .env*
 !.env.example
 # Local uv lockfile (optional, per-platform — see "Faster installs with uv" in README)

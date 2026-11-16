@@ -11,6 +11,8 @@ NOTES_TOOLS = {
     "manage_notes",
     "manage_calendar",
     "manage_tasks",
+    "schedule_reminder",
+    "send_notification",
     "ask_user",
     "update_plan",
 }

@@ -104,6 +104,7 @@ async def test_lost_navigation_response_remains_uncertain_and_is_not_retried(mon
 
 @pytest.mark.asyncio
 async def test_agent_dispatch_passes_request_navigation_ledger_into_computer_use(monkeypatch):
+    import sys
     context = ToolRunSecurityContext()
     seen_contexts = []
 
@@ -111,6 +112,8 @@ async def test_agent_dispatch_passes_request_navigation_ledger_into_computer_use
         seen_contexts.append(ctx.get("request_security_context"))
         return {"success": True, "exit_code": 0}
 
+    import src.agent_tools as live_agent_tools
+    monkeypatch.setitem(live_agent_tools.TOOL_HANDLERS, "computer_use", fake_computer_use)
     monkeypatch.setitem(TOOL_HANDLERS, "computer_use", fake_computer_use)
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
     result = await execute_tool_block(

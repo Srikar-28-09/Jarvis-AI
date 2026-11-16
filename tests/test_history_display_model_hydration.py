@@ -400,6 +400,9 @@ class _ChatHandler:
     async def handle_memory_command(self, _session, _message):
         return None
 
+    def update_session_name_if_needed(self, _session, _message):
+        pass
+
 
 def _json_request(path, payload):
     raw = json.dumps(payload).encode()
@@ -505,6 +508,7 @@ async def test_model_send_routes_hydrate_before_context_build(monkeypatch, path)
         lambda *_args, **_kwargs: False,
     )
     monkeypatch.setattr(chat_routes, "web_search_enabled_for_turn", lambda *_args: False)
+    monkeypatch.setattr(chat_routes, "answer_simple_request", lambda *_args: None)
 
     router = chat_routes.setup_chat_routes(
         manager,

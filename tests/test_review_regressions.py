@@ -97,6 +97,9 @@ def _install_model_route_import_stubs(monkeypatch):
     exceptions_mod.SessionNotFoundError = type("SessionNotFoundError", (Exception,), {})
     session_mgr_mod = types.ModuleType("core.session_manager")
     session_mgr_mod.SessionManager = MagicMock()
+    log_safety_mod = types.ModuleType("core.log_safety")
+    from core.log_safety import redact_url
+    log_safety_mod.redact_url = redact_url
 
     monkeypatch.delitem(sys.modules, "routes.model_routes", raising=False)
     monkeypatch.delitem(sys.modules, "routes.chat_routes", raising=False)
@@ -108,6 +111,7 @@ def _install_model_route_import_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "core.models", models_mod)
     monkeypatch.setitem(sys.modules, "core.exceptions", exceptions_mod)
     monkeypatch.setitem(sys.modules, "core.session_manager", session_mgr_mod)
+    monkeypatch.setitem(sys.modules, "core.log_safety", log_safety_mod)
 
 
 def _install_core_auth_stub(monkeypatch):

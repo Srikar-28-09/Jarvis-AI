@@ -1230,11 +1230,18 @@ def run_post_response_tasks(
     # Explicit memory extraction — immediately persist explicit memory commands
     # ("Remember that...", "Note that...", etc.) without waiting for the 4th turn.
     if allow_background_extraction and not incognito and not compare_mode and uprefs.get("auto_memory", True):
-        from services.memory.memory_extractor import (
-            has_explicit_memory_intent,
-            extract_explicit_memory_and_store,
+        from services.memory import memory_extractor as _memory_extractor
+        has_explicit_memory_intent = getattr(
+            _memory_extractor, "has_explicit_memory_intent", None
         )
-        if has_explicit_memory_intent(message):
+        extract_explicit_memory_and_store = getattr(
+            _memory_extractor, "extract_explicit_memory_and_store", None
+        )
+        if (
+            callable(has_explicit_memory_intent)
+            and callable(extract_explicit_memory_and_store)
+            and has_explicit_memory_intent(message)
+        ):
             try:
                 extract_explicit_memory_and_store(
                     sess, message, memory_manager, memory_vector, owner=owner,

@@ -205,7 +205,8 @@ class TestKimiCodeUserAgents:
             )
         ]
 
-        assert chunks == ["data: [DONE]\n\n"]
+        assert chunks[-1] == "data: [DONE]\n\n"
+        assert any("stream_diagnostics" in chunk for chunk in chunks)
         assert client.get_user_agents == [KIMI_CODE_USER_AGENTS[0], KIMI_CODE_USER_AGENTS[1]]
         assert client.stream_headers[0]["User-Agent"] == KIMI_CODE_USER_AGENTS[1]
         assert _kimi_code_ua_cache[_kimi_code_base_key(KIMI_CHAT_URL)] == KIMI_CODE_USER_AGENTS[1]

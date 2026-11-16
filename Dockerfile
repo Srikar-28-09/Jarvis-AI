@@ -81,12 +81,8 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # Keep local speech recognition opt-in separately from the broad optional set.
 ARG INSTALL_STT=false
 COPY requirements-stt.txt ./
-RUN if [ "$INSTALL_STT" = "true" ]; then pip install --no-cache-dir -r requirements-stt.txt; fi
-
-# python-magic powers content-based MIME sniffing in src/upload_handler.py.
-# Image-only (not in requirements.txt) because it needs the libmagic1 system
-# lib installed above; see the apt note near the top of this stage.
-RUN pip install --no-cache-dir python-magic==0.4.27
+RUN if [ "$INSTALL_STT" = "true" ]; then pip install --no-cache-dir -r requirements-stt.txt; fi \
+    && pip install --no-cache-dir python-magic==0.4.27
 
 # Pre-install the patched basicsr/gfpgan/facexlib wheels built in the
 # realesrgan-wheels stage (--no-deps keeps the image lean — torch & friends are
