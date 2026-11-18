@@ -31,6 +31,7 @@ from src.computer_use_controller import (
 )
 from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 from src.agent_tools import ToolBlock
+import src.tool_execution as tool_execution
 
 
 def test_tool_registry_contains_computer_use():
@@ -113,15 +114,18 @@ def test_computer_use_invoked_and_completed_end_to_end():
             }
         )
 
-        with patch.object(ComputerUseController, "run", mock_run):
+        with patch.object(tool_execution, "_owner_is_admin", return_value=True) as mock_is_admin, \
+             patch.object(ComputerUseController, "run", mock_run):
             block = ToolBlock("computer_use", json.dumps({"goal": "Open Notepad and type Hello from Jarvis."}))
             desc, result = await execute_tool_block(block, owner="admin", security_context=NO_TOOL_SECURITY_CONTEXT)
 
+            mock_is_admin.assert_called_once_with("admin")
             assert result["status"] == "completed"
             assert result["exit_code"] == 0
             assert result["actions_executed"] == 2
             assert result["iterations"] == 3
             assert result["metrics"]["total_elapsed_seconds"] == 5.9
+            mock_run.assert_awaited_once_with(goal="Open Notepad and type Hello from Jarvis.")
 
     asyncio.run(_test())
 
@@ -222,13 +226,16 @@ def test_controller_failure_returns_structured_result():
             }
         )
 
-        with patch.object(ComputerUseController, "run", mock_run):
+        with patch.object(tool_execution, "_owner_is_admin", return_value=True) as mock_is_admin, \
+             patch.object(ComputerUseController, "run", mock_run):
             block = ToolBlock("computer_use", json.dumps({"goal": "Open BrokenApp"}))
             desc, result = await execute_tool_block(block, owner="admin", security_context=NO_TOOL_SECURITY_CONTEXT)
 
+            mock_is_admin.assert_called_once_with("admin")
             assert result["status"] == "failed"
             assert result["exit_code"] == 1
             assert "BrokenApp" in result["error"]
+            mock_run.assert_awaited_once_with(goal="Open BrokenApp")
 
     asyncio.run(_test())
 
@@ -649,5 +656,4 @@ def test_frontend_static_computer_use_routing_and_elements():
     assert "approvalForSend?.source === 'computer_use'" in chat_js
     from src.action_intents import classify_tool_intent
     assert classify_tool_intent("Open Firefox").category == "computer"
-
 

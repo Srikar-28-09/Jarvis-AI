@@ -24,7 +24,8 @@ import asyncio
 import json
 import os
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+import host_bridge.actions as gui_actions
 
 from host_bridge.actions import (
     execute_click,
@@ -36,7 +37,6 @@ from host_bridge.actions import (
     MAX_TYPE_TEXT_LENGTH,
     MAX_SCROLL_AMOUNT,
     MIN_SCROLL_AMOUNT,
-    get_screen_bounds,
 )
 from src.agent_tools.computer_control_tools import (
     ClickTool,
@@ -51,21 +51,38 @@ from src.tool_capabilities import capabilities_for_tool, ToolEffect, ResultInteg
 from src.tool_security import NON_ADMIN_BLOCKED_TOOLS, _PLAN_MODE_KNOWN_MUTATORS
 
 
+@pytest.fixture(autouse=True)
+def mock_gui_platform_operations(monkeypatch):
+    """Keep GUI input tests headless by faking the platform backend boundary."""
+    orig_subprocess_run = gui_actions.subprocess.run
+
+    def fake_subprocess_run(cmd, *args, **kwargs):
+        if isinstance(cmd, (list, tuple)) and len(cmd) > 0 and cmd[0] == "xdotool":
+            return gui_actions.subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        return orig_subprocess_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(gui_actions, "IS_WINDOWS", False)
+    monkeypatch.setattr(gui_actions, "IS_LINUX", True)
+    monkeypatch.setattr(gui_actions, "get_screen_bounds", lambda: (1920, 1080))
+    monkeypatch.setattr(gui_actions.subprocess, "run", fake_subprocess_run)
+
+
 # ===========================================================================
 # 1. Click & Coordinate Boundaries
 # ===========================================================================
 
 def test_valid_click_execution():
-    w, h = get_screen_bounds()
+    w, h = gui_actions.get_screen_bounds()
     res = execute_click({"x": 100, "y": 100})
     assert res["success"] is True
     assert res["action"] == "click"
+    assert res["backend"] == "xdotool"
     assert res["x"] == 100
     assert res["y"] == 100
 
 
 def test_screen_boundary_coordinates():
-    w, h = get_screen_bounds()
+    w, h = gui_actions.get_screen_bounds()
     # Min bounds (0, 0)
     res_min = execute_click({"x": 0, "y": 0})
     assert res_min["success"] is True
@@ -76,7 +93,7 @@ def test_screen_boundary_coordinates():
 
 
 def test_invalid_coordinates_rejected():
-    w, h = get_screen_bounds()
+    w, h = gui_actions.get_screen_bounds()
 
     # Negative coordinates
     assert execute_click({"x": -1, "y": 100})["success"] is False
@@ -103,12 +120,13 @@ def test_valid_double_click_execution():
     res = execute_double_click({"x": 200, "y": 200})
     assert res["success"] is True
     assert res["action"] == "double_click"
+    assert res["backend"] == "xdotool"
     assert res["x"] == 200
     assert res["y"] == 200
 
 
 def test_invalid_double_click_coordinates():
-    w, h = get_screen_bounds()
+    w, h = gui_actions.get_screen_bounds()
     assert execute_double_click({"x": -10, "y": 200})["success"] is False
     assert execute_double_click({"x": 200, "y": h + 10})["success"] is False
 
@@ -159,6 +177,7 @@ def test_allowed_keys():
         res = execute_press_key({"key": key})
         assert res["success"] is True
         assert res["action"] == "press_key"
+        assert res["backend"] == "xdotool"
         assert res["key"] == key
 
 
@@ -176,6 +195,7 @@ def test_invalid_keys_rejected():
 def test_valid_scroll():
     res_up = execute_scroll({"direction": "up", "amount": 5})
     assert res_up["success"] is True
+    assert res_up["backend"] == "xdotool"
     assert res_up["direction"] == "up"
     assert res_up["amount"] == 5
 

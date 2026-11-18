@@ -253,15 +253,25 @@ def test_open_url_does_not_fallback_after_browser_reports_uncertain_failure(monk
     assert "no fallback" in result["error"]
 
 
-def test_screenshot_execution_direct():
+def test_screenshot_execution_direct(monkeypatch, tmp_path):
+    import host_bridge.actions as actions
+
+    raw_jpeg, b64_jpeg = _make_sample_jpeg_bytes()
+    monkeypatch.setattr(actions, "HOST_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        actions,
+        "_capture_desktop_screenshot_raw",
+        lambda: (320, 200, raw_jpeg, b64_jpeg),
+    )
+
     res = execute_screenshot({})
     assert res["success"] is True
     assert res["action"] == "screenshot"
-    assert res["width"] > 0
-    assert res["height"] > 0
+    assert res["width"] == 320
+    assert res["height"] == 200
     assert res["format"] == "jpeg"
-    assert "image_base64" in res
-    assert len(res["image_base64"]) > 0
+    assert res["image_base64"] == b64_jpeg
+    assert (tmp_path / "screenshots" / res["host_file_path"].rsplit("/", 1)[-1]).read_bytes() == raw_jpeg
 
 
 # ===========================================================================
@@ -284,6 +294,23 @@ def test_http_action_unknown(bridge_test_server):
     assert exc_info.value.code == 400
     err = json.loads(exc_info.value.read().decode())
     assert "Unknown action" in err["error"]
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer invalid-token"])
+def test_http_action_requires_authentication(bridge_test_server, authorization):
+    headers = {"Content-Type": "application/json"}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+
+    req = urllib.request.Request(
+        f"{bridge_test_server['url']}/v1/action",
+        data=json.dumps({"action": "open_url", "url": "https://example.com"}).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(req)
+    assert exc_info.value.code == 401
 
 
 def test_http_action_malformed_json(bridge_test_server):
@@ -321,10 +348,28 @@ def test_http_action_oversized_payload(bridge_test_server):
 # 5. Client Library & Agent Tool Integration
 # ===========================================================================
 
-def test_tool_execution_with_bridge(monkeypatch, bridge_test_server):
+def test_tool_execution_with_bridge(monkeypatch, bridge_test_server, tmp_path):
+    import host_bridge.actions as actions
+
     # Configure client to point to test server
     monkeypatch.setenv("JARVIS_HOST_BRIDGE_URL", bridge_test_server["url"])
     monkeypatch.setenv("JARVIS_HOST_BRIDGE_TOKEN", bridge_test_server["token"])
+
+    raw_jpeg, b64_jpeg = _make_sample_jpeg_bytes()
+    monkeypatch.setattr(actions, "HOST_WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        actions,
+        "_capture_desktop_screenshot_raw",
+        lambda: (320, 200, raw_jpeg, b64_jpeg),
+    )
+    monkeypatch.setattr(actions, "find_application_window", lambda *args, **kwargs: (None, None, None))
+    monkeypatch.setattr(actions, "is_application_running", lambda entry: (False, None))
+    monkeypatch.setattr(actions.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(
+        actions.subprocess,
+        "Popen",
+        lambda *args, **kwargs: None,
+    )
 
     async def _run():
         app_tool = OpenApplicationTool()
@@ -837,5 +882,3 @@ def test_mutter_screencast_unlocked_and_concurrent_serialization(monkeypatch):
     assert active_sessions["max_concurrent"] == 1
     assert active_sessions["count"] == 0
     assert active_sessions["stopped"] == 4
-
-

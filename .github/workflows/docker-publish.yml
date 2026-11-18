@@ -27,7 +27,6 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -50,6 +49,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Normalize and validate image reference
+        id: normalize
+        run: |
+          IMAGE_NAME=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REF="${REGISTRY}/${IMAGE_NAME}"
+          if ! printf '%s\n' "$IMAGE_REF" | grep -Eq '^ghcr\.io/[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)+$'; then
+            echo "::error::Invalid normalized image reference: $IMAGE_REF" >&2
+            exit 1
+          fi
+          if [ "$IMAGE_REF" != "$(printf '%s' "$IMAGE_REF" | tr '[:upper:]' '[:lower:]')" ]; then
+            echo "::error::Image reference is not lowercase: $IMAGE_REF" >&2
+            exit 1
+          fi
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "Validated normalized image reference: $IMAGE_REF"
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REGISTRY: ${{ env.REGISTRY }}
       - name: Set up Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e  # v4.3.0
       - name: Log in to GHCR
@@ -64,7 +81,7 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ steps.normalize.outputs.image_ref }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
       - name: Export digest
@@ -91,6 +108,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - name: Normalize and validate image reference
+        id: normalize
+        run: |
+          IMAGE_NAME=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REF="${REGISTRY}/${IMAGE_NAME}"
+          if ! printf '%s\n' "$IMAGE_REF" | grep -Eq '^ghcr\.io/[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)+$'; then
+            echo "::error::Invalid normalized image reference: $IMAGE_REF" >&2
+            exit 1
+          fi
+          if [ "$IMAGE_REF" != "$(printf '%s' "$IMAGE_REF" | tr '[:upper:]' '[:lower:]')" ]; then
+            echo "::error::Image reference is not lowercase: $IMAGE_REF" >&2
+            exit 1
+          fi
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "Validated normalized image reference: $IMAGE_REF"
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REGISTRY: ${{ env.REGISTRY }}
       - name: Read APP_VERSION + short sha
         id: ver
         run: |
@@ -116,7 +151,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.normalize.outputs.image_ref }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=${{ steps.ver.outputs.version }},enable=${{ github.ref == 'refs/heads/main' }}
@@ -126,17 +161,15 @@ jobs:
         working-directory: /tmp/digests
         run: |
           tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          digests=$(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+          digests=$(printf "${IMAGE_REF}@sha256:%s " *)
           # word-splitting is intended: $tags and $digests each expand to multiple args
           # shellcheck disable=SC2086
           docker buildx imagetools create $tags $digests
         env:
-          REGISTRY: ${{ env.REGISTRY }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_REF: ${{ steps.normalize.outputs.image_ref }}
       - name: Inspect
         run: |
           if [ "$GITHUB_REF" = "refs/heads/main" ]; then ref=latest; else ref=dev; fi
-          docker buildx imagetools inspect "${REGISTRY}/${IMAGE_NAME}:${ref}"
+          docker buildx imagetools inspect "${IMAGE_REF}:${ref}"
         env:
-          REGISTRY: ${{ env.REGISTRY }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_REF: ${{ steps.normalize.outputs.image_ref }}
