@@ -8,7 +8,7 @@ This page keeps Jarvis-AI's detailed install, deployment, troubleshooting, and c
 
 ## Quick Start
 
-> **Branch note:** `dev` is the default branch and contains the latest development changes, but it may be unstable. For the more stable curated branch, use [`main`](https://github.com/Srikar-28-09/Jarvis-AI/tree/main).
+> **Branch note:** `main` is the repository's default branch, so a fresh clone checks it out. Contributors can switch to [`dev`](https://github.com/Srikar-28-09/Jarvis-AI/tree/dev), the integration branch used for pull requests.
 
 Defaults work out of the box: clone, run, then configure models/search/email
 inside **Settings**. Only edit `.env` for deployment-level overrides like
@@ -134,24 +134,24 @@ only detect GPUs that Docker exposes to the container — if the host runtime or
 device passthrough is not configured, Cookbook sees the iGPU, another card, or
 CPU instead of your intended GPU.
 
-For NVIDIA, `scripts/check-docker-gpu.sh` diagnoses GPU passthrough and can
+For NVIDIA, `scripts/docker/check-docker-gpu.sh` diagnoses GPU passthrough and can
 optionally install the host runtime or update `.env`.
 
 ```bash
 # Read-only diagnostic (default — installs nothing, never edits .env):
-scripts/check-docker-gpu.sh
+scripts/docker/check-docker-gpu.sh
 
 # Print OS-specific install commands without running them:
-scripts/check-docker-gpu.sh --print-install-commands
+scripts/docker/check-docker-gpu.sh --print-install-commands
 
 # Install NVIDIA Container Toolkit on Ubuntu/Debian (requires sudo):
-scripts/check-docker-gpu.sh --install-nvidia-toolkit
+scripts/docker/check-docker-gpu.sh --install-nvidia-toolkit
 
 # Write COMPOSE_FILE to .env (only when GPU passthrough is confirmed working):
-scripts/check-docker-gpu.sh --enable-nvidia-overlay
+scripts/docker/check-docker-gpu.sh --enable-nvidia-overlay
 
 # Full assisted setup — install toolkit, then enable overlay if passthrough works:
-scripts/check-docker-gpu.sh --install-nvidia-toolkit --enable-nvidia-overlay
+scripts/docker/check-docker-gpu.sh --install-nvidia-toolkit --enable-nvidia-overlay
 ```
 #### Arch Linux NVIDIA Docker notes
 
@@ -227,7 +227,7 @@ sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
-Then re-run `scripts/check-docker-gpu.sh`.
+Then re-run `scripts/docker/check-docker-gpu.sh`.
 
 Safety notes:
 - The app never installs host GPU runtime automatically.
@@ -247,7 +247,7 @@ COMPOSE_FILE=docker-compose.yml:docker/gpu.nvidia.yml
 **AMD / ROCm.** AMD setup is read-only diagnostic plus manual `.env` edit. Run:
 
 ```bash
-scripts/check-docker-amd-gpu.sh
+scripts/docker/check-docker-amd-gpu.sh
 ```
 
 Then add the reported values to `.env`, replacing `RENDER_GID` with your host's

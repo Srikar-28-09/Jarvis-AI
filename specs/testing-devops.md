@@ -1,6 +1,6 @@
 # Testing And Devops
 
-Last updated: dev@e71f8ce | 2026-08-25
+Last updated: 2026-11-18
 
 ## Scope
 
@@ -13,7 +13,7 @@ This spec covers development and validation surfaces in:
 - `package.json` and `package-lock.json`;
 - `Dockerfile`, `docker-compose.yml`, `docker/gpu.nvidia.yml`, `docker/gpu.amd.yml`, `docker/host-docker.yml`, top-level standalone GPU compose files, and `docker/entrypoint.sh`;
 - `scripts/`, `scripts/odysseus`, `scripts/_lib/cli.py`, `scripts/_completion/*`, `scripts/pr_blocker_audit.py`, and `scripts/odysseus-*`;
-- GPU helper scripts `scripts/check-docker-gpu.sh` and `scripts/check-docker-amd-gpu.sh`;
+- GPU helper scripts `scripts/docker/check-docker-gpu.sh` and `scripts/docker/check-docker-amd-gpu.sh`; legacy root-level command shims remain;
 - `.github/` templates, workflows, and description-check scripts;
 - contributor workflow docs in `CONTRIBUTING.md` and `docs/pr-blocker-audit.md`;
 - platform launchers `launch-windows.ps1`, `launcher.py`, `Odysseus.spec`, `build-windows-portable.ps1`, `start-macos.sh`, `build-macos-app.sh`, and `update_windows.bat`;
@@ -37,7 +37,7 @@ Activated-venv `python -m pytest <test path>` is equivalent. System/global `pyte
 
 `tests/conftest.py` inserts the repo root on `sys.path` and conditionally stubs missing heavy/runtime dependencies such as SQLAlchemy, FastAPI, Starlette, Pydantic, httpx, bcrypt, and pyotp. Tests that need real dependencies use explicit imports/skips. Tests that stub `sys.modules`, environment variables, globals, or parent packages must restore them with `monkeypatch` or an equivalent cleanup pattern.
 
-The suite currently contains roughly 728 `test_*.py` files. Treat that count as a moving source metric, not a target; focused regression tests are still preferred for narrow changes.
+The `tests/test_*.py` glob selects Python test modules; the number of modules is not the number of individual test cases and changes as files are added. Use pytest collection output when a current case count is needed. Focused regression tests are still preferred for narrow changes.
 
 Focused regression tests are preferred for narrow behavior changes. Broaden tests when touching shared contracts such as auth, owner filtering, OAuth/token custody, tool output, context building, provider calls, persistence, frontend rendering, or route/API shapes.
 
@@ -45,7 +45,7 @@ Focused regression tests are preferred for narrow behavior changes. Broaden test
 
 ## JS And UI Tests
 
-The repo has no frontend build pipeline, npm test script, or type-check script. `package.json` owns Node dependencies for Bombadil and the Anthropic SDK, and `package-lock.json` owns npm integrity/version state.
+The root `package.json` has no scripts and declares Bombadil as a development dependency; it does not declare an Anthropic SDK. The desktop package has separate `test`, `build`, `dev`, and `tauri` scripts in `desktop/package.json`. Run its tests with `npm --prefix desktop test` and its frontend build with `npm --prefix desktop run build`. There is no root npm test script or configured type-check script.
 
 Current frontend/JS validation includes:
 
@@ -88,7 +88,7 @@ docker compose logs --tail=120 odysseus
 
 `docker-compose.yml` starts Odysseus, ChromaDB, SearXNG, and ntfy. It binds services to loopback by default through `APP_BIND`, `CHROMADB_BIND`, and `NTFY_BIND`, persists configurable `APP_DATA_DIR`/`APP_LOGS_DIR`, SSH identity, HuggingFace cache, and user-local Python installs, and gives the Odysseus container host-loopback reachability through `host.docker.internal`.
 
-Compose variants forward `ODYSSEUS_TTS_CACHE_MAX_BYTES`, defaulting in the service to 500 MiB, and run the mounted `scripts/migrate_searxng_settings.py` helper so retained SearXNG YAML gains default inheritance without replacement. The helper preserves file metadata and formatting where possible and writes atomically; migration failure is non-fatal to the wrapper command. MCP OAuth callback setup follows `OAUTH_REDIRECT_BASE_URL`, `APP_PUBLIC_URL`, or the launcher/bind `APP_PORT`, so externally remapped deployments should set a public base explicitly.
+Compose variants forward `ODYSSEUS_TTS_CACHE_MAX_BYTES`, defaulting to `524288000` bytes (500 MiB) when unset, matching the TTS service default. An explicit environment value overrides the default; invalid integers fall back to 500 MiB in the service, and values at or below zero disable eviction. Compose also runs the mounted `scripts/migrate_searxng_settings.py` helper so retained SearXNG YAML gains default inheritance without replacement. The helper preserves file metadata and formatting where possible and writes atomically; migration failure is non-fatal to the wrapper command. MCP OAuth callback setup follows `OAUTH_REDIRECT_BASE_URL`, `APP_PUBLIC_URL`, or the launcher/bind `APP_PORT`, so externally remapped deployments should set a public base explicitly.
 
 `Dockerfile` builds a Python 3.14 slim image with Node/npm, tmux, OpenSSH client, git/cmake, the pinned Docker CLI `29.6.2`, `gosu`, `libmagic1`, and the image-only `python-magic` wrapper.
 
@@ -104,13 +104,13 @@ GPU overlays pass host devices/runtime flags only. They do not install CUDA/ROCm
 
 NVIDIA helper behavior:
 
-- `scripts/check-docker-gpu.sh` diagnoses passthrough;
+- `scripts/docker/check-docker-gpu.sh` diagnoses passthrough;
 - it is read-only by default;
 - toolkit install and `.env` edits require explicit user flags and successful passthrough checks.
 
 AMD helper behavior:
 
-- `scripts/check-docker-amd-gpu.sh` is read-only;
+- `scripts/docker/check-docker-amd-gpu.sh` is read-only;
 - it prints expected `COMPOSE_FILE`/`RENDER_GID` values and verifies `/dev/kfd`/`/dev/dri` visibility.
 
 Native platform launchers:
@@ -147,7 +147,7 @@ When route/API behavior changes, check whether a matching CLI script depends on 
 
 `.github/` owns issue/PR templates, a copyable PR review template, description-check workflows, security/governance workflows, Docker publishing, and CI. Current CI runs on pushes to `main` and `dev` plus pull requests, compiles Python with `python -m compileall`, syntax-checks first-party JS with `node --check`, emits focused-test guidance for changed code, and runs the configured `python -m pytest -q` scope as an authoritative failing job; pytest still skips documentation-only changes.
 
-`CONTRIBUTING.md` owns the branch model: PRs target `dev`; `main` is the curated user-running branch fast-forwarded from stable `dev` commits. Contributors who accidentally target `main` should retarget the PR base without rebasing.
+`CONTRIBUTING.md` documents the current branch workflow: `main` is the GitHub default branch and new clones check it out; contributors target PRs at the `dev` integration branch by selecting it as the base.
 
 PR description checks:
 

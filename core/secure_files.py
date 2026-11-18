@@ -633,8 +633,8 @@ def _open_child_directory(directory, component: str, _base_path: str, *, create:
     return _open_directory_windows(child_path, create=create)
 
 
-def secure_read_json_at(base_dir: str, relative_path: str) -> Any:
-    """Read JSON beneath a trusted directory without following POSIX symlinks."""
+def secure_read_bytes_at(base_dir: str, relative_path: str) -> bytes:
+    """Read a private file beneath a trusted directory without following symlinks."""
     relative = Path(relative_path)
     if relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
         raise ValueError("relative path must not contain traversal components")
@@ -648,10 +648,16 @@ def secure_read_json_at(base_dir: str, relative_path: str) -> Any:
             )
             _close_directory(directory)
             directory = child
-        raw = _read_private_file(directory, relative.parts[-1], os.path.join(base_dir, *relative.parts))
-        return json.loads(raw.decode("utf-8"))
+        return _read_private_file(
+            directory, relative.parts[-1], os.path.join(base_dir, *relative.parts)
+        )
     finally:
         _close_directory(directory)
+
+
+def secure_read_json_at(base_dir: str, relative_path: str) -> Any:
+    """Read JSON beneath a trusted directory without following POSIX symlinks."""
+    return json.loads(secure_read_bytes_at(base_dir, relative_path).decode("utf-8"))
 
 
 def secure_file_exists_at(base_dir: str, relative_path: str) -> bool:

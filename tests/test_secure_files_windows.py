@@ -36,11 +36,14 @@ def test_default_and_custom_data_directories_create_private_keys(
     default_key_path = tmp_path / "default-data" / ".app_key"
     custom_data_dir = tmp_path / "custom-data"
     monkeypatch.setattr(secret_storage, "_KEY_PATH", default_key_path)
+    custom_manager = APIKeyManager(str(custom_data_dir))
+    custom_manager.mark_installation_state("first_run_pending")
+    custom_key = custom_manager.initialize_key(first_time=True)
     keys = (
         (default_key_path, secret_storage._load_or_create_key()),
         (
             custom_data_dir / ".key",
-            APIKeyManager(str(custom_data_dir)).get_or_create_key(),
+            custom_key,
         ),
     )
 

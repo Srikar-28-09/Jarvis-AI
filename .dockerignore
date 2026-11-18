@@ -1,4 +1,4 @@
-venv/
+ve nv/
 .venv/
 node_modules/
 services/node_modules/

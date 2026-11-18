@@ -11,6 +11,7 @@ diagnostic distinction the /api/diagnostics/services probe is built to surface.
 This test fails before the fix (memory_vector is None) and passes after it.
 """
 from unittest.mock import MagicMock
+import pytest
 
 import src.app_initializer as app_init
 import src.memory_vector as memory_vector_mod
@@ -57,6 +58,30 @@ def test_failed_memory_vector_init_is_kept_not_discarded(monkeypatch, tmp_path):
     mv = result["memory_vector"]
     assert mv is not None, "unhealthy MemoryVectorStore was discarded (reported as DISABLED, not DEGRADED/DOWN)"
     assert mv.healthy is False
+
+
+def test_app_initializer_missing_key_for_existing_installation_fails_closed(monkeypatch, tmp_path):
+    tmp_path.joinpath("api_keys.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(app_init, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(app_init, "PERSONAL_DIR", str(tmp_path / "personal_docs"))
+    monkeypatch.setattr(app_init, "RUNBOOK_DIR", str(tmp_path / "personal_docs" / "runbook"))
+    monkeypatch.setattr(app_init, "UPLOAD_DIR", str(tmp_path / "uploads"))
+    monkeypatch.setattr(app_init, "create_directories", lambda: None)
+
+    for name in [
+        "MemoryManager", "SkillsManager", "SessionManager", "UploadHandler",
+        "PersonalDocsManager", "PresetManager", "MemoryProviderRegistry",
+        "NativeMemoryProvider", "ChatProcessor", "ResearchHandler", "ChatHandler",
+        "ModelDiscovery",
+    ]:
+        monkeypatch.setattr(app_init, name, lambda *a, **k: MagicMock())
+    monkeypatch.setattr(app_init, "set_session_manager", lambda *a, **k: None)
+    monkeypatch.setattr(app_init, "update_search_config", lambda *a, **k: None)
+
+    with pytest.raises(Exception, match="missing|backup"):
+        app_init.initialize_managers(str(tmp_path), rag_manager=None)
+
+    assert not tmp_path.joinpath(".key").exists()
 
 
 def test_chromadb_health_reports_down_for_unhealthy_vector_store():

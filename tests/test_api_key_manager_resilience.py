@@ -1,10 +1,13 @@
 import os
 import json
+import pytest
 from src.api_key_manager import APIKeyManager
 from cryptography.fernet import Fernet
 
 def test_api_key_manager_load_resilience(tmp_path):
     mgr = APIKeyManager(str(tmp_path))
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
     
     # Save a valid key
     mgr.save("good_provider", "good_value")
@@ -25,18 +28,16 @@ def test_api_key_manager_load_resilience(tmp_path):
     with open(mgr.api_keys_file, "w", encoding="utf-8") as f:
         json.dump(keys, f)
         
-    # Load keys
-    loaded = mgr.load()
-    
-    # Assert load() returns the still-decryptable key and skips the bad ones without raising
-    assert "good_provider" in loaded
-    assert loaded["good_provider"] == "good_value"
-    assert "bad_provider" not in loaded
-    assert "garbage_provider" not in loaded
+    # Corrupted or wrong-key ciphertext must fail closed rather than silently
+    # dropping providers or appearing to delete them.
+    with pytest.raises(Exception, match="could not be authenticated"):
+        mgr.load()
 
 
 def test_load_ignores_non_string_raw_values(tmp_path):
     mgr = APIKeyManager(str(tmp_path))
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
 
     mgr.save("openai", "sk-openai")
     with open(mgr.api_keys_file, "r", encoding="utf-8") as f:

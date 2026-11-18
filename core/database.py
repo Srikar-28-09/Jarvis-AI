@@ -13,6 +13,11 @@ from sqlalchemy.orm import relationship, sessionmaker, backref
 
 from src.runtime_paths import get_app_root
 from core.platform_compat import safe_chmod, IS_WINDOWS
+from core.secure_files import (
+    secure_file_exists_at,
+    secure_read_json_at,
+    secure_write_json_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,7 @@ class TimestampMixin:
 
 # Ensure the writable data directory exists before SQLite connects.
 from src.constants import DATA_DIR, AUTH_FILE, MEMORY_FILE, USER_PREFS_FILE, SETTINGS_FILE
+_DATA_DIR_EXISTED_BEFORE_INIT = os.path.exists(DATA_DIR)
 Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
 
 
@@ -2074,6 +2080,64 @@ def init_db():
     Initialize the database by creating all tables.
     Should be called when starting the application.
     """
+    db_path = _sqlite_db_path(engine.url)
+    db_existed = db_path is not None and os.path.exists(db_path)
+    known_state_files = (
+        "api_keys.json", "auth.json", "sessions.json", "memory.json",
+        "settings.json", "user_preferences.json", "presets.json",
+        "integrations.json", "vault.json",
+    )
+    has_persisted_state = db_existed or any(
+        os.path.exists(os.path.join(DATA_DIR, name))
+        for name in known_state_files
+    )
+
+    if secure_file_exists_at(DATA_DIR, ".odysseus_installation"):
+        try:
+            marker_state = secure_read_json_at(
+                DATA_DIR,
+                ".odysseus_installation",
+            )
+        except Exception:
+            marker_state = None
+        if (
+            isinstance(marker_state, dict)
+            and marker_state.get("state") == "first_run_pending"
+            and has_persisted_state
+        ):
+            secure_write_json_at(
+                DATA_DIR,
+                ".odysseus_installation",
+                {"state": "existing"},
+            )
+
+    marker_missing = not secure_file_exists_at(DATA_DIR, ".odysseus_installation")
+    if marker_missing:
+        state = "existing" if has_persisted_state else "first_run_pending"
+        bootstrap_confirmed = str(os.getenv(
+            "ODYSSEUS_INITIALIZE_ENCRYPTION_KEY", ""
+        )).strip().lower() in {"1", "true", "yes", "on"}
+        if db_path is None:
+            # External databases have no portable file-existence signal.
+            # They are bootstrap-able only through explicit operator confirmation.
+            state = "first_run_pending" if bootstrap_confirmed else "existing"
+        elif not has_persisted_state:
+            # A directory that already existed but contains no recognized state
+            # is ambiguous. Only an absent directory or explicit confirmation
+            # proves a genuine first bootstrap.
+            state = (
+                "first_run_pending"
+                if (not _DATA_DIR_EXISTED_BEFORE_INIT or bootstrap_confirmed)
+                else "existing"
+            )
+        if has_persisted_state:
+            state = "existing"
+        secure_write_json_at(
+            DATA_DIR,
+            ".odysseus_installation",
+            {"state": state},
+        )
+
     _migrate_model_endpoints()
     Base.metadata.create_all(bind=engine)
     # Lock the DB file (and any SQLite sidecars) to 0o600 — it holds bearer-token

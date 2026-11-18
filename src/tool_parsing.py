@@ -12,8 +12,8 @@ import logging
 import re
 from typing import List, Optional, Tuple
 
-from src.agent_tools import ToolBlock, TOOL_TAGS
 from src.tool_security import BUILTIN_EMAIL_TOOLS
+from src.tool_contracts import TOOL_TAGS, ToolBlock
 
 logger = logging.getLogger(__name__)
 

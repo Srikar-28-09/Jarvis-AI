@@ -9,9 +9,9 @@ Jarvis-AI has two branches:
 - **`dev`** — where all PRs land. Things can be in flux here; the merge button gets used freely.
 - **`main`** — what users run. Curated and tested by the maintainer. Fast-forwarded to a stable `dev` commit at each release.
 
-**Open your PR against `dev`, not `main`.** The GitHub "base" dropdown defaults to `dev`. If you opened a PR against `main` by accident, click "Edit" on the PR and change the base — no rebase needed.
+GitHub currently uses `main` as the default branch, so a fresh clone checks out `main`. To work on the integration branch, switch to `dev`; open pull requests against `dev` by selecting it in the PR base dropdown. The dropdown may initially select `main`.
 
-End-users cloning the repo will land on `dev` by default. To run the curated/stable version: `git checkout main` after clone.
+Users who want the default release branch can stay on `main`. Contributors working against `dev` can switch with `git switch dev` after cloning.
 
 ## Before You Start
 

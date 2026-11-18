@@ -1587,7 +1587,7 @@ def _repair_document_function_args(tool_type: str, arguments: str) -> Optional[d
 
 def function_call_to_tool_block(name: str, arguments: str):
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
-    from src.agent_tools import ToolBlock, TOOL_TAGS
+    from src.tool_contracts import TOOL_TAGS, ToolBlock
     from src.tool_parsing import _TOOL_NAME_MAP
     tool_type = _TOOL_NAME_MAP.get(name, name)
     try:

@@ -6,6 +6,10 @@ This folder is the compact implementation-truth map for humans and coding agents
 
 Specs are living notes about current code shape and intended contracts. They are not product marketing, not PR planning, not templates, and not a replacement for source inspection or tests.
 
+For the cross-cutting repository structure and ownership map, see the
+[Architecture Overview](../docs/ARCHITECTURE_OVERVIEW.md). This index remains
+the entry point for detailed subsystem specifications.
+
 This `_readme.md` is the DocumentMap and control document. It is intentionally exempt from subsystem `Scope` and `Current Gaps` sections; keep it limited to the quality contract, working rules, subsystem map, and cross-cutting update triggers.
 
 ## Quality Contract

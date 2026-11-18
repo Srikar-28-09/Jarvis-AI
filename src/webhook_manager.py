@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import httpcore
 import httpx
 
+from src.api_key_manager import WebhookSecretStorageError
 from src.database import SessionLocal, Webhook
 
 logger = logging.getLogger(__name__)
@@ -349,13 +350,12 @@ class WebhookManager:
         """Decrypt a webhook signing secret from DB storage."""
         if not encrypted:
             return None
-        if self._api_key_manager:
-            try:
-                return self._api_key_manager.decrypt_api_key(encrypted)
-            except Exception:
-                # If decryption fails, assume it's stored in plaintext (legacy)
-                return encrypted
-        return encrypted
+        decrypt_secret = getattr(self._api_key_manager, "decrypt_webhook_secret", None)
+        if not callable(decrypt_secret):
+            raise WebhookSecretStorageError(
+                "Webhook secret decryption is unavailable"
+            )
+        return decrypt_secret(encrypted)
 
     def fire_and_forget(self, event: str, payload: dict):
         """Schedule webhook fire from any context (sync or async). Never blocks."""
@@ -381,7 +381,14 @@ class WebhookManager:
             db.close()
 
         for wh in matching:
-            decrypted_secret = self._decrypt_secret(wh.secret)
+            try:
+                decrypted_secret = self._decrypt_secret(wh.secret)
+            except WebhookSecretStorageError:
+                logger.error(
+                    "Webhook %s delivery skipped because its signing secret could not be authenticated",
+                    wh.id,
+                )
+                continue
             self._spawn_tracked(self._deliver(wh.id, wh.url, decrypted_secret, event, payload))
 
     async def deliver_test(self, webhook_id: str, url: str, encrypted_secret: Optional[str]):

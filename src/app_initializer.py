@@ -15,7 +15,7 @@ from services.memory.skills import SkillsManager
 from core.session_manager import SessionManager
 from core.models import set_session_manager
 from src.personal_docs import PersonalDocsManager
-from src.api_key_manager import APIKeyManager
+from src.api_key_manager import APIKeyManager, MalformedInstallationStateError
 from src.preset_manager import PresetManager
 from src.chat_processor import ChatProcessor
 from src.model_discovery import ModelDiscovery
@@ -83,6 +83,21 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     set_upload_handler(upload_handler)
     personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, rag_manager)
     api_key_manager = APIKeyManager(DATA_DIR)
+    try:
+        installation_state = api_key_manager.get_installation_state()
+    except MalformedInstallationStateError:
+        # A readable-but-corrupt marker can be healed only if the key itself is
+        # valid. Missing or unreadable key state remains fail-closed.
+        try:
+            api_key_manager.get_key()
+        except Exception:
+            raise
+        api_key_manager.mark_installation_state("installed")
+        api_key_manager.initialize_key(first_time=False)
+        installation_state = "installed"
+    except Exception:
+        raise
+    api_key_manager.initialize_key(first_time=installation_state == "first_run_pending")
     preset_manager = PresetManager(DATA_DIR)
 
     # Initialize memory vector store (share embedding model with RAG if available)

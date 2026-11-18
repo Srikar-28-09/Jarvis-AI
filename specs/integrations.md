@@ -114,6 +114,28 @@ Allowed outgoing events are:
 
 Current webhook event emitters include session creation, chat message/completion paths, and `/api/v1/chat` completion.
 
+Webhook signing secrets are stored with a versioned Fernet envelope using the API-key key. Authenticated legacy Fernet records remain readable. Missing keys, invalid ciphertext, and legacy plaintext fail closed; create a replacement webhook and remove the old one rather than attempting an automatic plaintext migration.
+
+The API-key and webhook encryption key is initialized only when a pristine
+installation is proven. The application uses a persistent
+`.odysseus_installation` state marker: a genuinely absent data directory can
+bootstrap with `ODYSSEUS_INITIALIZE_ENCRYPTION_KEY=1`; an existing data
+directory without recognized persisted state is ambiguous and fails closed
+rather than generating a key. Docker and external-database installations require
+the bootstrap variable explicitly for a genuinely first initialization.
+Subsequent startups read and validate the existing key without generating a
+replacement. A missing or corrupted key in an existing installation causes
+startup and credential operations to fail closed. Generate a replacement key
+only for a genuinely new installation; it does not restore access to existing
+ciphertext.
+
+Back up `data/.key` and `data/app.db` together and consistently (the database
+directory may contain additional SQLite sidecar files). If the original key is
+lost permanently, restore both the database and key from a consistent backup.
+If no backup exists, new credentials must be created again and existing
+encrypted API keys and webhook secrets must be replaced or removed; do not
+create a replacement key and continue as though old ciphertext can be recovered.
+
 `/api/v1/chat` is an inbound external chat endpoint. It requires a `chat` API token, checks session ownership before resume, can create a session from a direct API key, and otherwise falls back to the first owner-visible enabled model endpoint. Token-supplied direct `base_url` values use public-URL validation; configured endpoints remain admin-trusted. Logs and delivery/error text that include endpoint URLs should pass through URL redaction helpers before persistence or diagnostics.
 
 ## Task Webhooks And Event Triggers
@@ -178,7 +200,7 @@ This spec owns the cross-integration framing and agent/token/webhook surfaces. D
 
 ## Testing Notes
 
-Current targeted coverage includes API-token CRUD basics, chat-scoped `/api/models` token access, companion pairing/read-only owner scoping, webhook SSRF validation, webhook auth-exempt source checks, webhook CLI token masking, integration-store shape/encryption migration, Google email OAuth route/helper behavior, Cookbook API-token scopes, Cookbook adopt SSH host validation, and `/api/v1/chat` base-url/fallback owner scoping.
+Current targeted coverage includes API-token CRUD basics, chat-scoped `/api/models` token access, companion pairing/read-only owner scoping, webhook SSRF validation, webhook auth-exempt source checks, webhook secret encryption/legacy handling and route retrieval, webhook CLI token masking, integration-store shape/encryption migration, Google email OAuth route/helper behavior, Cookbook API-token scopes, Cookbook adopt SSH host validation, and `/api/v1/chat` base-url/fallback owner scoping.
 
 The integration audit also ran the targeted venv subset covering those areas with 52 passing tests and one warning.
 
@@ -191,7 +213,6 @@ The integration audit also ran the targeted venv subset covering those areas wit
 - `do_manage_tokens()` does not match `/api/tokens` semantics for `ody_` prefix, owner, scopes, and cache invalidation.
 - `do_manage_webhooks()` bypasses route behavior and does not cover signing-secret parity.
 - Companion read endpoints should either require `chat` scope or be documented as an explicit scope-policy exception.
-- Decide whether webhook secret plaintext fallback should remain accepted when the API key manager is unavailable.
 - Decide whether generic integration base URLs should stay LAN-capable by default or make `INTEGRATION_API_BLOCK_PRIVATE_IPS=true` the default.
 - Admin-authored integration descriptions and `api_call` results enter the untrusted-result/gated-action pipeline, but their product-level trust presentation still needs continued review.
 - The dormant SQLAlchemy `Integration` model should be removed, migrated into use, or documented as legacy.

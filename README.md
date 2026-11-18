@@ -27,7 +27,7 @@
 
 ## Quick Start
 
-> `dev` is the default branch and gets the newest changes first. Use [`main`](https://github.com/Srikar-28-09/Jarvis-AI/tree/main) if you want the more curated branch.
+Cloning the repository checks out `main`, the current default branch. See [Contributing](CONTRIBUTING.md) for the development-branch workflow.
 
 ```bash
 git clone https://github.com/Srikar-28-09/Jarvis-AI.git

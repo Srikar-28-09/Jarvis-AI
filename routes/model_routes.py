@@ -2696,7 +2696,7 @@ def setup_model_routes(model_discovery):
     @router.get("/tools")
     def list_tools():
         """List all available tools with their enabled/disabled status."""
-        from src.agent_tools import TOOL_TAGS
+        from src.tool_contracts import TOOL_TAGS
         settings = _load_settings()
         disabled = set(settings.get("disabled_tools", []))
         tools = []

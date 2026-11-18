@@ -127,6 +127,7 @@ def test_real_auth_middleware_uses_application_relative_path(tmp_path):
         "DATABASE_URL": f"sqlite:///{tmp_path / 'app.db'}",
         "LOCALHOST_BYPASS": "false",
         "ODYSSEUS_DATA_DIR": str(tmp_path),
+        "ODYSSEUS_INITIALIZE_ENCRYPTION_KEY": "1",
         "ODYSSEUS_DISABLE_MCP": "1",
         "OPENAI_API_KEY": "",
         "PYTHONPATH": str(ROOT),

@@ -12,7 +12,7 @@ body:
 
         For security vulnerabilities, **do not open a public issue** —
         use [GitHub Security Advisories](https://github.com/Srikar-28-09/Jarvis-AI/security/advisories/new)
-        and read [SECURITY.md](https://github.com/Srikar-28-09/Jarvis-AI/blob/dev/SECURITY.md) first.
+        and read [SECURITY.md](https://github.com/Srikar-28-09/Jarvis-AI/blob/main/SECURITY.md) first.
 
   - type: checkboxes
     id: prerequisites
@@ -21,9 +21,9 @@ body:
       options:
         - label: I searched [open issues](https://github.com/Srikar-28-09/Jarvis-AI/issues?q=is%3Aissue+is%3Aopen) and [discussions](https://github.com/Srikar-28-09/Jarvis-AI/discussions) and did not find an existing report of this bug.
           required: true
-        - label: This is **not** a security vulnerability. (Vulnerabilities go to [GitHub Security Advisories](https://github.com/Srikar-28-09/Jarvis-AI/security/advisories/new) — see [SECURITY.md](https://github.com/Srikar-28-09/Jarvis-AI/blob/dev/SECURITY.md).)
+        - label: This is **not** a security vulnerability. (Vulnerabilities go to GitHub Security Advisories — see [SECURITY.md](https://github.com/Srikar-28-09/Jarvis-AI/blob/main/SECURITY.md).)
           required: true
-        - label: I am running the latest code from the `dev` branch (the default branch you get on clone, where fixes land first) and the bug still reproduces there. Please `git pull` the latest `dev` before filing.
+        - label: I am running the latest code from the `main` branch (the repository default branch) and the bug still reproduces there. Please `git pull` the latest `main` before filing.
           required: true
 
   - type: input

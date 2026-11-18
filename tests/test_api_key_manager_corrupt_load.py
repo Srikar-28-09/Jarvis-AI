@@ -28,5 +28,7 @@ def test_missing_file_returns_empty(tmp_path):
 
 def test_valid_roundtrip(tmp_path):
     mgr = _mgr(tmp_path)
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
     mgr.save("openai", "sk-secret")
     assert mgr.load() == {"openai": "sk-secret"}

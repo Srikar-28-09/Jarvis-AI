@@ -9,6 +9,9 @@ from core import secure_files
 
 def test_save_creates_private_atomic_json_file(tmp_path):
     mgr = APIKeyManager(str(tmp_path))
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
+    mgr.initialize_key()
     mgr.save("openai", "sk-test")
 
     # The final file should exist with the correct content
@@ -25,6 +28,9 @@ def test_save_creates_private_atomic_json_file(tmp_path):
 def test_save_preserves_existing_keys_atomically(tmp_path):
     """Verify atomic save doesn't corrupt other providers' keys."""
     mgr = APIKeyManager(str(tmp_path))
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
+    mgr.initialize_key()
     mgr.save("openai", "sk-openai")
     mgr.save("anthropic", "sk-anthropic")
 
@@ -36,6 +42,8 @@ def test_save_preserves_existing_keys_atomically(tmp_path):
 def test_save_preserves_original_on_write_failure(tmp_path):
     """If the temp file write fails, the original keys file must survive intact."""
     mgr = APIKeyManager(str(tmp_path))
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
     mgr.save("openai", "sk-original")
 
     # Fail after the private sibling temporary file has been opened.
@@ -55,6 +63,8 @@ def test_save_preserves_original_on_write_failure(tmp_path):
 def test_save_cleans_up_tmp_on_failure(tmp_path):
     """Temp file should be removed if the write fails."""
     mgr = APIKeyManager(str(tmp_path))
+    mgr.mark_installation_state("first_run_pending")
+    mgr.initialize_key(first_time=True)
     mgr.save("openai", "sk-original")
 
     def replace_fails(source, destination, **kwargs):

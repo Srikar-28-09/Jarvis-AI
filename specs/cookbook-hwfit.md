@@ -16,7 +16,7 @@ This spec covers model setup/serving and hardware fit in:
 - `services/hwfit/*` and `services/hwfit/data/hf_models.json`;
 - durable Cookbook state through `routes.cookbook_helpers.COOKBOOK_STATE_FILE`;
 - helper/CLI scripts `scripts/odysseus-cookbook`, `scripts/add_hwfit_models.py`, `scripts/hf_download.py`, and `scripts/diffusion_server.py`;
-- Docker overlays `docker-compose.gpu-*.yml`, `docker/gpu.*.yml`, `docker/host-docker.yml`, `scripts/check-docker-gpu.sh`, and `scripts/check-docker-amd-gpu.sh`;
+- Docker overlays `docker-compose.gpu-*.yml`, `docker/gpu.*.yml`, `docker/host-docker.yml`, and diagnostic helpers `scripts/docker/check-docker-gpu.sh` and `scripts/docker/check-docker-amd-gpu.sh` (legacy root-level command shims remain);
 - frontend modules `static/js/cookbook*.js`, including Cookbook running, serve, download, diagnosis, progress, and HW Fit modules;
 - tests covering Cookbook helpers, routes, CLI state, package detection, frontend progress, HW Fit services, serve profiles, Docker GPU overlays, and GPU diagnostic scripts.
 

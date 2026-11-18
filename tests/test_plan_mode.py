@@ -74,16 +74,12 @@ def test_mcp_readonly_classification():
 def test_fail_closed_fallback_blocks_mutations(monkeypatch):
     # If the schema list can't load, we must still block (fail closed), not
     # return an empty set that would silently allow every mutating tool.
-    import src.tool_security as ts
+    import sys
 
-    def _boom():
-        raise ImportError("simulated circular import failure")
-
-    # Force the dynamic path to fail by making the lazy import explode.
-    monkeypatch.setitem(
-        __import__("sys").modules, "src.agent_tools", None
-    )
-    disabled = ts.plan_mode_disabled_tools()
+    # Schema loading no longer depends on the compatibility facade, so fail
+    # the actual schema import boundary.
+    monkeypatch.setitem(sys.modules, "src.tool_schemas", None)
+    disabled = plan_mode_disabled_tools()
     assert disabled, "plan mode must never fail open (empty disabled set)"
     assert "write_file" in disabled
     assert "send_email" in disabled

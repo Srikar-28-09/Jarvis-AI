@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Odysseus — a self-hosted AI workspace: chat, agents, tools, model serving, email, research, and more. Your models, your hardware, your data.">
-<title>Odysseus — A Self-Hosted AI Workspace</title>
+<meta name="description" content="Jarvis-AI — a self-hosted AI workspace: chat, agents, tools, model serving, email, research, and more. Your models, your hardware, your data.">
+<title>Jarvis-AI — A Self-Hosted AI Workspace</title>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4L16 22L6 22Z' fill='%23e06c75'/%3E%3Cpath d='M16 8L16 22L24 22Z' fill='%23e06c75' opacity='0.6'/%3E%3Cpath d='M4 24Q10 20 16 24Q22 28 28 24' stroke='%23e06c75' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
 <style>
   :root {
-    /* Odysseus default theme — exact app tokens */
+    /* Jarvis-AI theme, retaining the original Odysseus design tokens */
     --bg: #282c34;
     --bg2: #1e2228;          /* app code/hl background */
     --panel: #111;           /* app panel surface */
@@ -52,8 +52,7 @@
     background-image: radial-gradient(circle, rgba(156,222,242,0.06) 1px, transparent 1.4px);
     background-size: 24px 24px;
   }
-  /* Customers section gets a brand-colored gradient glow over the dots. */
-  #testimonials {
+  #workspace {
     background-color: var(--bg);
     background-image:
       radial-gradient(900px 520px at 80% 8%, rgba(224,108,117,0.14), transparent 60%),
@@ -194,58 +193,6 @@
   .sub { color: var(--muted); max-width: 620px; }
   .center { text-align: center; }
   .center .sub { margin: 0 auto; }
-
-  /* Testimonial gag — single featured testimonial, click/swipe to cycle (all sizes) */
-  .tcarousel-wrap { position: relative; max-width: 820px; margin: 36px auto 0; }
-  .tarrow {
-    position: absolute; top: 50%; transform: translateY(-50%); z-index: 4;
-    width: 38px; height: 38px; border-radius: 50%;
-    background: rgba(17,17,17,0.85); border: 1px solid var(--border); color: var(--fg);
-    font-size: 20px; line-height: 1; cursor: pointer;
-    display: flex; align-items: center; justify-content: center;
-    transition: border-color .12s ease, color .12s ease;
-  }
-  .tarrow:hover { border-color: var(--accent); color: var(--accent); }
-  .tarrow.prev { left: 0; }
-  .tarrow.next { right: 0; }
-  .tgrid {
-    display: block; position: relative; overflow: hidden; cursor: pointer;
-    margin: 0 auto; max-width: 740px;
-  }
-  .tgrid .tcard {
-    display: none;
-    flex-direction: row-reverse; align-items: center; gap: 24px; text-align: left;
-    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 28px;
-  }
-  .tgrid .tcard.active { display: flex; animation: tslide .25s ease both; }
-  .tgrid .tcard.active.shake { animation: tshake .5s ease-in-out 2 both; }
-  .tcard .av {
-    width: 84px; height: 84px; border-radius: 50%; overflow: hidden;
-    border: 1px solid var(--border); background: var(--panel2); flex: 0 0 auto;
-  }
-  .tcard .av img, .tcard .av svg { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .tcard .tmeta { flex: 1 1 auto; }
-  .tcard .q { font-size: 18px; color: var(--fg); margin: 0 0 12px; }
-  .tcard .stars { font-size: 15px; letter-spacing: 3px; margin: 0 0 8px; color: var(--gold); }
-  .tcard .stars.zero { color: var(--muted); opacity: 0.5; }
-  .tcard .nm { font-weight: 700; font-size: 14.5px; }
-  .tcard .rl { color: var(--muted); font-size: 12.5px; }
-  .tcard.cyclops { border-color: rgba(255,90,90,0.45); background: linear-gradient(180deg, rgba(255,80,80,0.06), var(--panel)); }
-  .tcard.cyclops .q { color: #ff8a8a; font-weight: 700; letter-spacing: 0.4px; word-break: break-word; }
-  .tnav { display: block; text-align: center; margin-top: 18px; }
-  .tdot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #39414d; margin: 0 4px; cursor: pointer; }
-  .tdot.on { background: var(--accent); }
-  .thint { font-size: 12px; color: var(--muted); margin-top: 8px; }
-  @keyframes tshake {
-    0%,100% { transform: translateX(0) rotate(0); }
-    10% { transform: translateX(-9px) rotate(-1.5deg); }
-    20% { transform: translateX(9px) rotate(1.5deg); }
-    35% { transform: translateX(-7px) rotate(-1deg); }
-    50% { transform: translateX(7px) rotate(1deg); }
-    65% { transform: translateX(-5px); } 80% { transform: translateX(4px); } 92% { transform: translateX(-2px); }
-  }
-  @keyframes tslide { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
 
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 36px; }
   .feature {
@@ -390,9 +337,6 @@
   }
   @media (max-width: 520px) {
     .grid { grid-template-columns: 1fr; }
-    .tgrid .tcard { padding: 20px; gap: 16px; }
-    .tcard .av { width: 64px; height: 64px; }
-    .tcard .q { font-size: 15px; }
   }
 </style>
 </head>
@@ -402,14 +346,14 @@
     <div class="wrap">
       <div class="brand">
         <svg class="boat" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
-        Odysseus
+        Jarvis-AI
       </div>
       <div class="nav-links">
         <a href="#features">Features</a>
-        <a href="#testimonials">Testimonials</a>
+        <a href="#workspace">Your workspace</a>
         <a href="#how">How it started</a>
         <a href="#start">Get started</a>
-        <a class="btn" href="https://github.com/odysseus-dev/odysseus" target="_blank">
+        <a class="btn" href="https://github.com/Srikar-28-09/Jarvis-AI" target="_blank">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 4.7 18.3 5 18.3 5c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .4.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
           GitHub
         </a>
@@ -423,12 +367,12 @@
     <div class="wrap">
       <div class="hero-logo">
         <svg viewBox="0 0 32 32" width="48" height="48" aria-hidden="true"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>
-        <span class="wordmark">Odysseus</span>
+        <span class="wordmark">Jarvis-AI</span>
       </div>
       <p class="slogan">Yours for the voyage.</p>
       <h1>Your own <span class="grad">AI workspace</span>,<br>running on your hardware.</h1>
       <p class="lede">
-        Odysseus is a self-hosted interface for talking to language models &mdash; chat,
+        Jarvis-AI is a self-hosted interface for talking to language models &mdash; chat,
         autonomous agents, tools, model serving, email, research, and more. Local-first,
         privacy-first, and no telemetry. Just you and your models.
       </p>
@@ -437,7 +381,7 @@
       </p>
       <div class="hero-cta">
         <a class="btn primary" href="#start">Get started</a>
-        <a class="btn" href="https://github.com/odysseus-dev/odysseus" target="_blank">View on GitHub</a>
+        <a class="btn" href="https://github.com/Srikar-28-09/Jarvis-AI" target="_blank">View on GitHub</a>
       </div>
 
     </div>
@@ -466,7 +410,7 @@
         <div class="feature">
           <span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span>
           <h3>Cookbook</h3>
-          <p>Hardware-aware model recommendations and one-click serving across 270+ catalogued models.</p>
+          <p>Hardware-aware model recommendations and controls for serving supported catalog models.</p>
         </div>
         <div class="feature">
           <span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/></svg></span>
@@ -502,83 +446,30 @@
     </div>
   </section>
 
-  <!-- TESTIMONIALS (gag) -->
-  <section id="testimonials" style="padding-top:30px;">
+  <section id="workspace" style="padding-top:30px;">
     <div class="wrap">
       <div class="center">
-        <div class="eyebrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 5.6a5.2 5.2 0 0 0-7.4 0L12 7l-1.4-1.4a5.2 5.2 0 1 0-7.4 7.4L12 21.4l8.8-8.4a5.2 5.2 0 0 0 0-7.4z"/></svg>Loved by enterprises</div>
-        <h2 class="h">What our customers are saying</h2>
+        <div class="eyebrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Built around your setup</div>
+        <h2 class="h">Choose how your AI workspace works</h2>
+        <p class="sub">Connect the models and tools you want to use, then run Jarvis-AI on infrastructure you control.</p>
       </div>
-
-      <div class="tcarousel-wrap">
-      <button class="tarrow prev" type="button" aria-label="Previous testimonial">&#8249;</button>
-      <div class="tgrid" id="tcarousel">
-
-        <!-- Coder guy -->
-        <figure class="tcard">
-          <span class="av"><img src="https://cdn.prod.website-files.com/66708f90d7e407423093fa76/66708f91d7e407423093fd21_john-carter-testimonial-image-dentistry-x-webflow-template.png" alt="Generic Coder Guy" loading="lazy"></span>
-          <div class="tmeta">
-            <p class="q">"Odysseus helped us ship more ships while shipping ships. Truly best-in-class shipping."</p>
-            <div class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
-            <div class="nm">Generic Coder Guy</div>
-            <div class="rl">Sr. Engineer, ShipShip Inc.</div>
-          </div>
-        </figure>
-
-        <!-- Woman -->
-        <figure class="tcard">
-          <span class="av"><img src="https://images.pexels.com/photos/5876695/pexels-photo-5876695.jpeg?auto=compress&amp;cs=tinysrgb&amp;w=160&amp;h=160&amp;fit=crop" alt="A real woman" loading="lazy"></span>
-          <div class="tmeta">
-            <p class="q">"I'm a real person. This is a real testimonial. By a real woman."</p>
-            <div class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
-            <div class="nm">Generic Corporate Woman</div>
-            <div class="rl">VP of Verticals, Things LLC</div>
-          </div>
-        </figure>
-
-        <!-- Cyclops -->
-        <figure class="tcard cyclops" data-shake="1">
-          <span class="av" style="border-color:rgba(255,90,90,0.6);">
-            <svg viewBox="0 0 72 72" width="54" height="54" fill="none" stroke="#cbd5e1" stroke-width="2">
-              <rect x="0" y="0" width="72" height="72" fill="#16241a"/>
-              <circle cx="36" cy="32" r="18" fill="#7fae7f" stroke="#5a7a5a"/>
-              <line x1="29" y1="22" x2="43" y2="34" stroke="#ff5a5a" stroke-width="3"/>
-              <line x1="43" y1="22" x2="29" y2="34" stroke="#ff5a5a" stroke-width="3"/>
-              <ellipse cx="36" cy="45" rx="7" ry="9" fill="#3a0a0a" stroke="#200"/>
-              <path d="M31 51 l-1 4" stroke="#fff" stroke-width="2"/><path d="M41 51 l1 4" stroke="#fff" stroke-width="2"/>
-            </svg>
-          </span>
-          <div class="tmeta">
-            <p class="q">"AHHHHHHHHHHHHHHHHHHHHHHHHHHHHH"</p>
-            <div class="stars zero">&#9734;&#9734;&#9734;&#9734;&#9734;</div>
-            <div class="nm">Polyphemus</div>
-            <div class="rl">Cyclops, Cave Solutions (on leave)</div>
-          </div>
-        </figure>
-
-        <!-- Corporate -->
-        <figure class="tcard">
-          <span class="av">
-            <svg viewBox="0 0 80 80" aria-hidden="true">
-              <rect width="80" height="80" rx="18" fill="#111827"/>
-              <circle cx="40" cy="29" r="14" fill="#d1d5db"/>
-              <path d="M18 70c4-18 15-27 22-27s18 9 22 27" fill="#374151"/>
-              <path d="M28 58h24l-5 12H33z" fill="#e06c75"/>
-              <path d="M32 14h16l6 11H26z" fill="#f8fafc"/>
-            </svg>
-          </span>
-          <div class="tmeta">
-            <p class="q">"Anyway, as I was saying &mdash; best-in-class."</p>
-            <div class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
-            <div class="nm">Chad Corporate</div>
-            <div class="rl">Chief Executive Officer</div>
-          </div>
-        </figure>
-
+      <div class="grid">
+        <div class="feature">
+          <span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span>
+          <h3>Model choice</h3>
+          <p>Connect configured local or hosted model endpoints and choose which one to use.</p>
+        </div>
+        <div class="feature">
+          <span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.8-3.8a6 6 0 0 1-7.9 7.9l-6.9 6.9a2.1 2.1 0 0 1-3-3l6.9-6.9a6 6 0 0 1 7.9-7.9z"/></svg></span>
+          <h3>Tools and integrations</h3>
+          <p>Use built-in tools, connect MCP servers, and configure event webhooks.</p>
+        </div>
+        <div class="feature">
+          <span class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></span>
+          <h3>Self-hosted deployment</h3>
+          <p>Run the backend with Docker or a native install, with optional desktop and Host Bridge components.</p>
+        </div>
       </div>
-      <button class="tarrow next" type="button" aria-label="Next testimonial">&#8250;</button>
-      </div>
-      <div class="tnav" id="tnav"></div>
     </div>
   </section>
 
@@ -586,7 +477,7 @@
   <!-- The one-shot prompt it started from (gag) -->
   <section style="padding-top:0;">
     <div class="wrap" style="text-align:center;">
-      <p class="term-intro">Odysseus was created by a carefully crafted one-shot AI prompt:</p>
+      <p class="term-intro">The original Odysseus project began with a one-shot AI prompt; Jarvis-AI continues that work:</p>
       <div class="term">
         <div class="term-bar">
           <span class="ttl">user@odysseus: ~</span>
@@ -658,16 +549,15 @@
       <div class="eyebrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15.6 8.4-2.1 5.1-5.1 2.1 2.1-5.1z"/></svg>How it actually started</div>
       <h2 class="h">Uncompromised local LLM experience.</h2>
       <p class="sub" style="max-width:760px;">
-        I started working on the Odysseus project because running local AI felt fun and powerful.
-        But the options at the time to engage with LLMs felt like taking steps back. The idea that you
-        could just self-host AI and not pay for a subscription wasn't there. All the tools and functions
-        that make it all magic were missing.
+        The Odysseus project began with the goal of making local AI feel fun and powerful.
+        At the time, the available ways to engage with LLMs felt like taking steps back. The idea that you
+        could self-host AI without a subscription was not well served, and many of the tools and functions
+        that make it useful were missing.
       </p>
       <p class="sub" style="max-width:760px; margin-top:14px;">
-        So I started building Odysseus bit by bit &mdash; and the more I gave it to work with, the
-        better it served me. Turns out the more your model knows about you, the more useful it gets.
-        Which is the other reason to self-host: you get all that context without handing your private
-        data to someone else's cloud.      </p>
+        Jarvis-AI continues building on that project. Self-hosting lets you give your model useful context
+        without handing your private data to someone else's cloud.
+      </p>
     </div>
   </section>
 
@@ -676,11 +566,11 @@
     <div class="wrap">
       <div class="start">
         <div class="eyebrow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg>Get started</div>
-        <h2 class="h" style="margin-bottom:6px;">Odysseus is yours.</h2>
+        <h2 class="h" style="margin-bottom:6px;">Jarvis-AI is yours.</h2>
         <p class="sub center" style="margin:0 auto;">It's open source and free. No sales team, no demo request, no Trojan horse.</p>
-        <div class="codeblock"><span><span class="prompt">$</span> git clone https://github.com/odysseus-dev/odysseus.git &amp;&amp; cd odysseus</span><button class="copy-btn" data-copy="git clone https://github.com/odysseus-dev/odysseus.git && cd odysseus">Copy</button></div>
+        <div class="codeblock"><span><span class="prompt">$</span> git clone https://github.com/Srikar-28-09/Jarvis-AI.git &amp;&amp; cd Jarvis-AI</span><button class="copy-btn" data-copy="git clone https://github.com/Srikar-28-09/Jarvis-AI.git && cd Jarvis-AI">Copy</button></div>
         <div>
-          <a class="btn primary" href="https://github.com/odysseus-dev/odysseus" target="_blank" style="margin-top:14px;">View on GitHub</a>
+          <a class="btn primary" href="https://github.com/Srikar-28-09/Jarvis-AI" target="_blank" style="margin-top:14px;">View on GitHub</a>
         </div>
         <div class="pill-row">
           <span class="pill">Self-hosted</span>
@@ -695,7 +585,7 @@
 
   <footer>
     <div class="wrap">
-      <div>&copy; 2026 Odysseus &middot; Built from one prompt that refused to stop.</div>
+      <div>Jarvis-AI continues the Odysseus project &middot; See <a href="https://github.com/Srikar-28-09/Jarvis-AI/blob/dev/ACKNOWLEDGMENTS.md">acknowledgments and licenses</a>.</div>
       <div>No cyclopes were harmed in production.<sup>*</sup></div>
     </div>
   </footer>
@@ -890,58 +780,6 @@
         term.classList.remove('term-closed', 'term-min');
         reopen.classList.remove('show');
       });
-    })();
-
-    // Mobile testimonial carousel: tap or swipe to advance; Polyphemus shakes ~1s.
-    (function () {
-      var carousel = document.getElementById('tcarousel');
-      var nav = document.getElementById('tnav');
-      if (!carousel || !nav) return;
-      var cards = [].slice.call(carousel.querySelectorAll('.tcard'));
-      if (!cards.length) return;
-      var idx = 0;
-
-      var dots = cards.map(function (_, k) {
-        var d = document.createElement('span');
-        d.className = 'tdot';
-        d.addEventListener('click', function (e) { e.stopPropagation(); show(k); });
-        nav.appendChild(d);
-        return d;
-      });
-      var hint = document.createElement('div');
-      hint.className = 'thint';
-      hint.textContent = 'tap or swipe for the next satisfied customer →';
-      nav.appendChild(hint);
-
-      function show(i) {
-        idx = (i + cards.length) % cards.length;
-        cards.forEach(function (c, k) { c.classList.toggle('active', k === idx); c.classList.remove('shake'); });
-        dots.forEach(function (d, k) { d.classList.toggle('on', k === idx); });
-        var cur = cards[idx];
-        if (cur.getAttribute('data-shake') === '1') {
-          void cur.offsetWidth;
-          cur.classList.add('shake');
-          setTimeout(function () { cur.classList.remove('shake'); }, 1000);
-        }
-      }
-
-      carousel.addEventListener('click', function () { show(idx + 1); });
-
-      var _prev = document.querySelector('.tarrow.prev');
-      var _next = document.querySelector('.tarrow.next');
-      if (_prev) _prev.addEventListener('click', function (e) { e.stopPropagation(); show(idx - 1); });
-      if (_next) _next.addEventListener('click', function (e) { e.stopPropagation(); show(idx + 1); });
-
-      var sx = null;
-      carousel.addEventListener('touchstart', function (e) { sx = e.touches[0].clientX; }, { passive: true });
-      carousel.addEventListener('touchend', function (e) {
-        if (sx === null) return;
-        var dx = e.changedTouches[0].clientX - sx;
-        if (Math.abs(dx) > 30) { show(idx + (dx < 0 ? 1 : -1)); }
-        sx = null;
-      });
-
-      show(0);
     })();
 
     // Copy button for the codeblock command.

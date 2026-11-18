@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from core.database import SessionLocal, Webhook, ModelEndpoint
 from src.auth_helpers import owner_filter
+from src.api_key_manager import WebhookSecretStorageError
 from src.url_security import validate_public_http_url
 from src.webhook_manager import WebhookManager, validate_webhook_url, validate_events
 
@@ -114,12 +115,15 @@ def setup_webhook_routes(
             raise HTTPException(400, str(e))
 
         secret_val = secret.strip()[:MAX_SECRET_LEN] or None
-        # Encrypt the secret at rest using the same Fernet key as API keys
         encrypted_secret = None
-        if secret_val and api_key_manager:
-            encrypted_secret = api_key_manager.encrypt_api_key(secret_val)
-        elif secret_val:
-            encrypted_secret = secret_val  # Fallback if no encryption available
+        if secret_val:
+            encrypt_secret = getattr(api_key_manager, "encrypt_webhook_secret", None)
+            if not callable(encrypt_secret):
+                raise HTTPException(503, "Webhook secret encryption is unavailable")
+            try:
+                encrypted_secret = encrypt_secret(secret_val)
+            except WebhookSecretStorageError as e:
+                raise HTTPException(503, str(e)) from e
 
         webhook_id = str(uuid.uuid4())[:8]
         db = SessionLocal()
@@ -150,7 +154,10 @@ def setup_webhook_routes(
         finally:
             db.close()
 
-        await webhook_manager.deliver_test(webhook_id, url, secret)
+        try:
+            await webhook_manager.deliver_test(webhook_id, url, secret)
+        except WebhookSecretStorageError as e:
+            raise HTTPException(503, str(e)) from e
         return {"status": "sent"}
 
     @router.patch("/webhooks/{webhook_id}")
