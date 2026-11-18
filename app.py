@@ -1144,11 +1144,18 @@ async def _startup_event():
         # Create/reconcile default automation tasks + personal assistant for every user.
         owners = set()
         try:
-            import json as _json
-            auth_path = AUTH_FILE
-            with open(auth_path, encoding="utf-8") as f:
-                users = _json.load(f).get("users", {})
+            from core.secure_files import secure_read_json_at
+
+            auth_data = secure_read_json_at(
+                os.path.dirname(AUTH_FILE) or ".",
+                os.path.basename(AUTH_FILE),
+            )
+            users = auth_data.get("users", {})
             owners.update(users.keys())
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise
         except Exception as e:
             logger.debug(f"Default task auth-owner scan: {e}")
 
@@ -1191,10 +1198,13 @@ async def _startup_event():
     # ownerless or deleted/test-owner SKILL.md files so strict owner filtering
     # does not make an existing library look empty after auth/account changes.
     try:
-        import json as _json
-        auth_path = AUTH_FILE
-        with open(auth_path, encoding="utf-8") as f:
-            users = _json.load(f).get("users", {})
+        from core.secure_files import secure_read_json_at
+
+        auth_data = secure_read_json_at(
+            os.path.dirname(AUTH_FILE) or ".",
+            os.path.basename(AUTH_FILE),
+        )
+        users = auth_data.get("users", {})
         primary_owner = None
         for uname, udata in users.items():
             if udata.get("is_admin") is True:
@@ -1206,6 +1216,10 @@ async def _startup_event():
             changed = skills_manager.backfill_owner(primary_owner, set(users.keys()))
             if changed:
                 logger.info("Assigned %s legacy skill file(s) to %s", changed, primary_owner)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise
     except Exception as e:
         logger.debug(f"Skill owner backfill skipped: {e}")
 

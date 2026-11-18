@@ -1,7 +1,7 @@
-"""Pin the security fixes from the 2026-05-19 session so they don't regress:
+"""Pin security behavior so it does not regress:
 
-- `src.secret_storage.encrypt/decrypt` round-trip, idempotent on already-
-  encrypted input, transparent on legacy plaintext, fail-soft on bad key.
+- `src.secret_storage.encrypt/decrypt` round-trip, authenticated ciphertext
+  handling, versioned migration, and fail-closed errors for bad ciphertext.
 - `routes.email_helpers._q` quotes IMAP mailbox names so a folder named
   `"INBOX" (BODY ...` (or one containing `\\`) can't terminate the IMAP
   command early.
@@ -18,6 +18,7 @@ import importlib
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 
 # ── prompt-injection context wrapper ────────────────────────────
@@ -48,7 +49,7 @@ def _import_secret_storage(tmp_path, monkeypatch):
     """Import src.secret_storage with the key file redirected to tmp."""
     # Make sure a previous test's cached module doesn't reuse its key.
     sys.modules.pop("src.secret_storage", None)
-    from src import secret_storage  # noqa: WPS433
+    secret_storage = importlib.import_module("src.secret_storage")
     monkeypatch.setattr(secret_storage, "_KEY_PATH", tmp_path / ".app_key")
     monkeypatch.setattr(secret_storage, "_fernet", None)
     return secret_storage
@@ -57,7 +58,7 @@ def _import_secret_storage(tmp_path, monkeypatch):
 def test_secret_storage_roundtrip(tmp_path, monkeypatch):
     ss = _import_secret_storage(tmp_path, monkeypatch)
     enc = ss.encrypt("hunter2")
-    assert enc.startswith("enc:")
+    assert enc.startswith("enc:v2:")
     assert ss.decrypt(enc) == "hunter2"
 
 
@@ -68,11 +69,57 @@ def test_secret_storage_empty_input(tmp_path, monkeypatch):
 
 
 def test_secret_storage_idempotent_encrypt(tmp_path, monkeypatch):
-    """Encrypting an already-encrypted value should pass it through. This
-    is what lets the startup migration run safely on every boot."""
+    """Authenticated application ciphertext remains safe to save unchanged."""
     ss = _import_secret_storage(tmp_path, monkeypatch)
     enc = ss.encrypt("hunter2")
     assert ss.encrypt(enc) == enc
+
+
+def test_secret_storage_encrypts_plaintext_with_encryption_prefix(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    plaintext = "enc:Summer2026!"
+
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.encrypt(plaintext)
+
+    encrypted = ss.encrypt_plaintext(plaintext)
+
+    assert encrypted != plaintext
+    assert ss.is_encrypted(encrypted)
+    assert ss.decrypt(encrypted) == plaintext
+
+
+def test_secret_storage_encrypts_plaintext_containing_foreign_fernet_token(
+    tmp_path, monkeypatch
+):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    foreign = Fernet(Fernet.generate_key())
+    plaintext = "enc:" + foreign.encrypt(b"not application ciphertext").decode()
+
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.encrypt(plaintext)
+
+    encrypted = ss.encrypt_plaintext(plaintext)
+
+    assert encrypted.startswith("enc:v2:")
+    assert encrypted != plaintext
+    assert ss.decrypt(encrypted) == plaintext
+
+
+def test_secret_storage_reads_and_migrates_existing_fernet_format(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    fernet = Fernet(Fernet.generate_key())
+    legacy_encrypted = "enc:" + fernet.encrypt(b"existing secret").decode("ascii")
+
+    monkeypatch.setattr(ss, "_fernet", fernet)
+
+    assert ss.is_encrypted(legacy_encrypted)
+    assert ss.encrypt(legacy_encrypted) == legacy_encrypted
+    assert ss.decrypt(legacy_encrypted) == "existing secret"
+    migrated = ss.migrate_encrypted_value(legacy_encrypted)
+    assert migrated.startswith("enc:v2:")
+    assert ss.decrypt(migrated) == "existing secret"
+    assert ss.migrate_encrypted_value(migrated) == migrated
 
 
 def test_secret_storage_legacy_plaintext_passes_through(tmp_path, monkeypatch):
@@ -91,12 +138,158 @@ def test_secret_storage_is_encrypted(tmp_path, monkeypatch):
     assert not ss.is_encrypted("")
 
 
-def test_secret_storage_corrupt_token_returns_empty(tmp_path, monkeypatch):
-    """A row encrypted under a different key (or hand-corrupted) must
-    degrade to '' rather than raise — so a single bad row can't 500 the
-    whole email config lookup."""
+def test_secret_storage_rejects_malformed_legacy_ciphertext(tmp_path, monkeypatch):
     ss = _import_secret_storage(tmp_path, monkeypatch)
-    assert ss.decrypt("enc:not-a-valid-fernet-token") == ""
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.decrypt("enc:not-a-valid-fernet-token")
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.is_encrypted("enc:not-a-valid-fernet-token")
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.migrate_encrypted_value("enc:not-a-valid-fernet-token")
+
+
+def test_secret_storage_does_not_reinterpret_malformed_prefixed_value(
+    tmp_path, monkeypatch
+):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    malformed = "enc:not-a-valid-fernet-token"
+
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.encrypt(malformed)
+
+    encrypted = ss.encrypt_plaintext(malformed)
+    assert encrypted != malformed
+    assert ss.is_encrypted(encrypted)
+    assert ss.decrypt(encrypted) == malformed
+
+
+def test_secret_storage_wrong_key_fails_closed(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    original = Fernet(Fernet.generate_key())
+    encrypted = "enc:" + original.encrypt(b"existing secret").decode("ascii")
+    monkeypatch.setattr(ss, "_fernet", Fernet(Fernet.generate_key()))
+
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.is_encrypted(encrypted)
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.decrypt(encrypted)
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.encrypt(encrypted)
+    wrapped_plaintext = ss.encrypt_plaintext(encrypted)
+    assert wrapped_plaintext.startswith("enc:v2:")
+    assert ss.decrypt(wrapped_plaintext) == encrypted
+
+
+def test_secret_storage_v2_ciphertext_rejects_wrong_key(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    encrypted = ss.encrypt("existing secret")
+    monkeypatch.setattr(ss, "_fernet", Fernet(Fernet.generate_key()))
+
+    with pytest.raises(ss.SecretDecryptionError):
+        ss.decrypt(encrypted)
+
+
+def test_secret_storage_unavailable_key_fails_closed(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    encrypted = "enc:" + Fernet(Fernet.generate_key()).encrypt(
+        b"existing secret"
+    ).decode("ascii")
+    ss._KEY_PATH.write_bytes(b"invalid key")
+
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        ss.decrypt(encrypted)
+
+
+def test_secret_storage_rejects_corrupted_versioned_ciphertext(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    encrypted = ss.encrypt("private")
+    token = encrypted[len("enc:v2:"):]
+    corrupted = "enc:v2:" + token[:-1] + ("A" if token[-1] != "A" else "B")
+
+    with pytest.raises(ss.SecretDecryptionError):
+        ss.decrypt(corrupted)
+    with pytest.raises(ss.SecretDecryptionError):
+        ss.migrate_encrypted_value(corrupted)
+
+
+def test_secret_storage_migration_encrypts_plaintext_and_is_repeatable(
+    tmp_path, monkeypatch
+):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    legacy_plaintext = "a legacy password"
+
+    encrypted = ss.migrate_encrypted_value(legacy_plaintext)
+
+    assert encrypted.startswith("enc:v2:")
+    assert ss.decrypt(encrypted) == legacy_plaintext
+    assert ss.migrate_encrypted_value(encrypted) == encrypted
+
+
+def test_email_password_migration_upgrades_legacy_and_preserves_ambiguous_rows(
+    tmp_path, monkeypatch
+):
+    from sqlalchemy import create_engine, text
+    import core.database as database
+
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    fernet = Fernet(Fernet.generate_key())
+    monkeypatch.setattr(ss, "_fernet", fernet)
+    engine = create_engine(f"sqlite:///{tmp_path / 'migration.db'}")
+    monkeypatch.setattr(database, "engine", engine)
+    legacy = "enc:" + fernet.encrypt(b"legacy password").decode("ascii")
+    ambiguous = "enc:truncated-ciphertext"
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE email_accounts "
+            "(id TEXT PRIMARY KEY, imap_password TEXT, smtp_password TEXT)"
+        ))
+        conn.execute(
+            text("INSERT INTO email_accounts VALUES ('legacy', :pw, NULL), "
+                 "('ambiguous', :bad, NULL)"),
+            {"pw": legacy, "bad": ambiguous},
+        )
+
+    with pytest.raises(ss.AmbiguousLegacySecretError):
+        database._migrate_encrypt_email_passwords()
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT imap_password FROM email_accounts WHERE id = 'legacy'"
+        )).scalar_one() == legacy
+        assert conn.execute(text(
+            "SELECT imap_password FROM email_accounts WHERE id = 'ambiguous'"
+        )).scalar_one() == ambiguous
+
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM email_accounts WHERE id = 'ambiguous'"))
+    database._migrate_encrypt_email_passwords()
+    with engine.connect() as conn:
+        migrated = conn.execute(text(
+            "SELECT imap_password FROM email_accounts WHERE id = 'legacy'"
+        )).scalar_one()
+    assert migrated.startswith("enc:v2:")
+    assert ss.decrypt(migrated) == "legacy password"
+
+    database._migrate_encrypt_email_passwords()
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT imap_password FROM email_accounts WHERE id = 'legacy'"
+        )).scalar_one() == migrated
+    engine.dispose()
+
+
+def test_secret_storage_encryption_failure_propagates_from_database_binding(
+    tmp_path, monkeypatch
+):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+
+    def unavailable_key():
+        raise RuntimeError("key unavailable")
+
+    monkeypatch.setattr(ss, "_get_fernet", unavailable_key)
+    from core.database import EncryptedText
+
+    with pytest.raises(RuntimeError, match="key unavailable"):
+        EncryptedText().process_bind_param("must not persist in plaintext", None)
 
 
 @pytest.mark.skipif(
@@ -104,7 +297,7 @@ def test_secret_storage_corrupt_token_returns_empty(tmp_path, monkeypatch):
     reason="POSIX mode bits (0o600) don't exist on Windows; the key file is "
     "protected by the user-profile NTFS ACL instead, and safe_chmod no-ops there.",
 )
-def test_secret_storage_key_created_with_safe_mode(tmp_path, monkeypatch):
+def test_secret_storage_key_created_with_private_mode(tmp_path, monkeypatch):
     """The auto-generated key file must be mode 0o600 — anyone who can
     read it can decrypt every stored secret."""
     ss = _import_secret_storage(tmp_path, monkeypatch)
@@ -112,6 +305,16 @@ def test_secret_storage_key_created_with_safe_mode(tmp_path, monkeypatch):
     assert (tmp_path / ".app_key").exists()
     mode = (tmp_path / ".app_key").stat().st_mode & 0o777
     assert mode == 0o600, f"expected 0o600, got 0o{mode:o}"
+
+
+def test_secret_storage_key_creation_rejects_symlink(tmp_path, monkeypatch):
+    ss = _import_secret_storage(tmp_path, monkeypatch)
+    outside = tmp_path / "outside-key"
+    outside.write_bytes(Fernet.generate_key())
+    ss._KEY_PATH.symlink_to(outside)
+
+    with pytest.raises(OSError):
+        ss._load_or_create_key()
 
 
 # ── secure-by-default deployment + integration storage ─────────

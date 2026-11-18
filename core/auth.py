@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 from core.atomic_io import atomic_write_json as _atomic_write_json  # noqa: E402
+from core.secure_files import secure_read_json_at  # noqa: E402
 
 DEFAULT_PRIVILEGES = {
     "can_use_agent": True,
@@ -113,22 +114,23 @@ class AuthManager:
 
     def _load(self):
         try:
-            if os.path.exists(self.auth_path):
-                with open(self.auth_path, "r", encoding="utf-8") as f:
-                    self._config = json.load(f)
-                # Normalize all stored usernames to lowercase so they match
-                # the .strip().lower() applied at login/verify time. Fixes
-                # "Invalid credentials" when auth.json was written with
-                # mixed-case keys (e.g. via manual edit or a future migration).
-                if "users" in self._config:
-                    self._config["users"] = {
-                        k.strip().lower(): v
-                        for k, v in self._config["users"].items()
-                    }
-                logger.info("Auth config loaded")
-            else:
+            try:
+                self._config = secure_read_json_at(
+                    os.path.dirname(self.auth_path) or ".",
+                    os.path.basename(self.auth_path),
+                )
+            except FileNotFoundError:
                 self._config = {}
                 logger.info("No auth config found — first-run setup required")
+                return
+            if "users" in self._config:
+                self._config["users"] = {
+                    k.strip().lower(): v
+                    for k, v in self._config["users"].items()
+                }
+            logger.info("Auth config loaded")
+        except (PermissionError, OSError):
+            raise
         except Exception as e:
             logger.error(f"Failed to load auth config: {e}")
             self._config = {}
@@ -136,15 +138,22 @@ class AuthManager:
     def _load_sessions(self):
         """Load persisted session tokens from disk, pruning expired ones."""
         try:
-            if os.path.exists(self._sessions_path):
-                with open(self._sessions_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                now = time.time()
-                self._sessions = {k: v for k, v in data.items() if v.get("expiry", 0) > now}
-                pruned = len(data) - len(self._sessions)
-                if pruned > 0:
-                    self._save_sessions()
-                logger.info(f"Loaded {len(self._sessions)} session(s) from disk")
+            try:
+                data = secure_read_json_at(
+                    os.path.dirname(self._sessions_path) or ".",
+                    os.path.basename(self._sessions_path),
+                )
+            except FileNotFoundError:
+                self._sessions = {}
+                return
+            now = time.time()
+            self._sessions = {k: v for k, v in data.items() if v.get("expiry", 0) > now}
+            pruned = len(data) - len(self._sessions)
+            if pruned > 0:
+                self._save_sessions()
+            logger.info(f"Loaded {len(self._sessions)} session(s) from disk")
+        except (PermissionError, OSError):
+            raise
         except Exception as e:
             logger.error(f"Failed to load sessions: {e}")
             self._sessions = {}
@@ -154,9 +163,10 @@ class AuthManager:
         try:
             with self._sessions_lock:
                 snapshot = dict(self._sessions)
-            _atomic_write_json(self._sessions_path, snapshot)
+            _atomic_write_json(self._sessions_path, snapshot, sensitive=True)
         except Exception as e:
             logger.error(f"Failed to save sessions: {e}")
+            raise
 
     def _migrate_single_user(self):
         """Migrate old single-user format to multi-user format."""
@@ -219,7 +229,7 @@ class AuthManager:
             self._save()
 
     def _save(self):
-        _atomic_write_json(self.auth_path, self._config, indent=2)
+        _atomic_write_json(self.auth_path, self._config, indent=2, sensitive=True)
 
     @property
     def users(self) -> Dict[str, Any]:

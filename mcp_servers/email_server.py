@@ -183,10 +183,15 @@ def _default_document_owner() -> str | None:
     if owner:
         return owner
     try:
-        auth_path = DATA_DIR / "auth.json"
-        if not auth_path.exists():
-            return None
-        users = (json.loads(auth_path.read_text(encoding="utf-8")).get("users") or {})
+        from core.secure_files import secure_read_json_at
+
+        auth_data = secure_read_json_at(str(DATA_DIR), "auth.json")
+        users = (auth_data.get("users") or {})
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise
+    try:
         if not isinstance(users, dict) or not users:
             return None
         admins = [name for name, data in users.items() if isinstance(data, dict) and data.get("is_admin")]

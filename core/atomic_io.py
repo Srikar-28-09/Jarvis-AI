@@ -7,8 +7,9 @@ truncated or empty file. For password DBs (`auth.json`) and live state
 (`sessions.json`, `settings.json`, `integrations.json`, `cookbook_state.json`),
 that's a data-loss event.
 
-`atomic_write_json` writes to a sibling tmp file, fsyncs, then `os.replace`s
-into place. On POSIX `os.replace` is atomic on the same filesystem.
+`atomic_write_json` writes to a sibling tmp file with restrictive POSIX
+permissions, fsyncs, then `os.replace`s into place. On POSIX `os.replace` is
+atomic on the same filesystem.
 """
 
 from __future__ import annotations
@@ -19,7 +20,13 @@ import uuid
 from typing import Any, Optional
 
 
-def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None) -> None:
+def atomic_write_json(
+    path: str,
+    data: Any,
+    *,
+    indent: Optional[int] = None,
+    sensitive: bool = False,
+) -> None:
     """Atomically persist `data` as JSON at `path`.
 
     The temp file uses a random suffix so two concurrent writers saving the
@@ -28,11 +35,23 @@ def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None) -> 
     the same path within one process (or one single-process container, where
     the PID never changes at all) still race for the same temp file.
     """
+    if sensitive:
+        from core.secure_files import secure_write_json_at
+
+        secure_write_json_at(
+            os.path.dirname(path) or ".",
+            os.path.basename(path),
+            data,
+            indent=indent,
+        )
+        return
+
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{uuid.uuid4().hex}"
 
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=indent)
             f.flush()
             os.fsync(f.fileno())

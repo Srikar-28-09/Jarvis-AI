@@ -56,14 +56,22 @@ def _resolve_event_owner(owner: Optional[str]) -> Optional[str]:
         return owner
 
     try:
-        auth_path = AUTH_FILE
-        with open(auth_path, "r", encoding="utf-8") as f:
-            users = (json.load(f).get("users") or {})
+        from core.secure_files import secure_read_json_at
+
+        auth_data = secure_read_json_at(
+            os.path.dirname(AUTH_FILE) or ".",
+            os.path.basename(AUTH_FILE),
+        )
+        users = (auth_data.get("users") or {})
         for username, data in users.items():
             if data.get("is_admin") is True:
                 return username
         if users:
             return next(iter(users))
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise
     except Exception:
         logger.debug("Could not resolve ownerless event owner", exc_info=True)
     return None

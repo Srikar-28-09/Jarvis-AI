@@ -13,6 +13,8 @@ writers to the same path don't collide on the same temp file.
 """
 import importlib.util
 import json
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -65,6 +67,27 @@ def test_atomic_write_json_creates_missing_parent_dirs(tmp_path):
 
     assert target.exists()
     assert json.loads(target.read_text(encoding="utf-8")) == {"ok": True}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mode bits")
+def test_atomic_write_json_creates_private_temp_and_target(tmp_path, monkeypatch):
+    target = tmp_path / "auth.json"
+    target.write_text('{"old": true}', encoding="utf-8")
+    target.chmod(0o644)
+    original_replace = atomic_io.os.replace
+    old_umask = os.umask(0)
+
+    def inspect_temp_mode(source, destination):
+        assert Path(source).stat().st_mode & 0o777 == 0o600
+        original_replace(source, destination)
+
+    monkeypatch.setattr(atomic_io.os, "replace", inspect_temp_mode)
+    try:
+        atomic_write_json(str(target), {"password_hash": "sensitive"})
+    finally:
+        os.umask(old_umask)
+
+    assert target.stat().st_mode & 0o777 == 0o600
 
 
 def test_atomic_write_json_fully_overwrites_longer_content(tmp_path):
@@ -156,6 +179,69 @@ def test_atomic_write_json_preserves_target_when_replace_fails(tmp_path, monkeyp
     assert target.read_text(encoding="utf-8") == before
     # Temp file should be cleaned up
     assert _tmp_siblings(tmp_path, "data.json") == []
+
+
+def test_sensitive_atomic_json_uses_secure_private_storage(tmp_path):
+    target = tmp_path / "auth.json"
+
+    atomic_write_json(str(target), {"users": {}}, sensitive=True)
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"users": {}}
+    if os.name == "posix":
+        assert target.stat().st_mode & 0o777 == 0o600
+        assert target.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_sensitive_atomic_json_preserves_data_and_cleans_temp_on_failure(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "auth.json"
+    atomic_write_json(str(target), {"existing": True}, sensitive=True)
+    original = target.read_text(encoding="utf-8")
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("replacement failed")
+
+    monkeypatch.setattr(atomic_io.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replacement failed"):
+        atomic_write_json(str(target), {"new": True}, sensitive=True)
+
+    assert target.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob(".auth.json.tmp.*")) == []
+
+
+def test_sensitive_atomic_json_concurrent_writers_do_not_collide(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "auth.json"
+    original_dump = json.dump
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def synchronized_dump(payload, stream, **kwargs):
+        original_dump(payload, stream, **kwargs)
+        stream.flush()
+        barrier.wait()
+
+    def write(payload):
+        try:
+            atomic_write_json(str(target), payload, sensitive=True)
+        except Exception as exc:  # noqa: BLE001 - asserted after both threads finish
+            errors.append(exc)
+
+    monkeypatch.setattr(json, "dump", synchronized_dump)
+    threads = [
+        threading.Thread(target=write, args=({"writer": "A"},)),
+        threading.Thread(target=write, args=({"writer": "B"},)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert json.loads(target.read_text(encoding="utf-8"))["writer"] in ("A", "B")
+    assert list(tmp_path.glob(".auth.json.tmp.*")) == []
 
 
 # ---------------------------------------------------------------------------

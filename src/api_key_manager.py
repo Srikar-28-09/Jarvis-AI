@@ -4,7 +4,11 @@ import logging
 from typing import Dict
 from cryptography.fernet import Fernet, InvalidToken
 
-from core.platform_compat import safe_chmod
+from core.secure_files import (
+    secure_load_or_create_key,
+    secure_read_json_at,
+    secure_write_json_at,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,22 +20,7 @@ class APIKeyManager:
         
     def get_or_create_key(self) -> bytes:
         """Get or create encryption key for API keys"""
-        if os.path.exists(self.key_file):
-            # Older versions wrote .key with the process umask (often 0o644,
-            # i.e. group/world-readable). Re-restrict on read so existing
-            # installs heal without needing the key to be regenerated.
-            safe_chmod(self.key_file, 0o600)
-            with open(self.key_file, 'rb') as f:
-                return f.read()
-        else:
-            key = Fernet.generate_key()
-            with open(self.key_file, 'wb') as f:
-                f.write(key)
-            # This key decrypts every stored provider credential, so restrict it
-            # to the owner (0o600) — it must not be group/world-readable. No-op
-            # on Windows (files there are ACL-restricted to the user already).
-            safe_chmod(self.key_file, 0o600)
-            return key
+        return secure_load_or_create_key(self.key_file, Fernet.generate_key)
     
     def encrypt_api_key(self, api_key: str) -> str:
         """Encrypt an API key"""
@@ -53,12 +42,11 @@ class APIKeyManager:
         Tolerates a missing/corrupt/wrong-shaped file by returning {} — the
         same robustness load() relies on at startup.
         """
-        if not os.path.exists(self.api_keys_file):
-            return {}
         try:
-            with open(self.api_keys_file, 'r', encoding="utf-8") as f:
-                encrypted_keys = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+            encrypted_keys = secure_read_json_at(self.data_dir, "api_keys.json")
+        except FileNotFoundError:
+            return {}
+        except (json.JSONDecodeError, UnicodeError) as e:
             # A corrupt/truncated api_keys.json must not crash load() (called on
             # startup via app_initializer) — treat it as no stored keys.
             logger.warning("Failed to read API keys file: %s", e)
@@ -87,20 +75,7 @@ class APIKeyManager:
         """
         keys = self._load_raw()
         keys[provider] = self.encrypt_api_key(api_key)
-        tmp_file = self.api_keys_file + ".tmp"
-        try:
-            with open(tmp_file, 'w', encoding="utf-8") as f:
-                json.dump(keys, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp_file, self.api_keys_file)
-        except OSError:
-            # Clean up temp file on failure; re-raise so callers see the error
-            try:
-                os.remove(tmp_file)
-            except OSError:
-                pass
-            raise
+        secure_write_json_at(self.data_dir, "api_keys.json", keys)
 
     def load(self) -> Dict[str, str]:
         """Load and decrypt API keys"""

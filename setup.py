@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Odysseus — first-time setup script.
+"""Jarvis-AI — first-time setup script.
 
 Creates data directories, initializes the database, and sets up an
 initial admin user. Safe to re-run (skips what already exists).
@@ -19,6 +19,8 @@ from src.constants import (
     RAG_DIR, MEMORY_VECTORS_DIR, AGENT_WORKSPACE_DIR, PASSWORD_MIN_LENGTH,
 )
 from core.auth import RESERVED_USERNAMES
+from core.atomic_io import atomic_write_json
+from core.secure_files import secure_file_exists_at
 
 DIRS = [
     DATA_DIR,
@@ -90,14 +92,15 @@ def _prompt_admin_credentials():
 def create_default_admin():
     """Create an initial admin user if none exists."""
     auth_path = AUTH_FILE
-    if os.path.exists(auth_path):
+    if secure_file_exists_at(
+        os.path.dirname(auth_path) or ".",
+        os.path.basename(auth_path),
+    ):
         print("  [skip] auth.json already exists")
         return "exists"
 
     try:
         import bcrypt
-        import json
-
         # Priority: env vars > interactive prompt > random password
         username = os.getenv("ODYSSEUS_ADMIN_USER", "").strip().lower()
         password = os.getenv("ODYSSEUS_ADMIN_PASSWORD", "").strip()
@@ -128,8 +131,7 @@ def create_default_admin():
                 }
             }
         }
-        with open(auth_path, "w", encoding="utf-8") as f:
-            json.dump(auth_data, f, indent=2)
+        atomic_write_json(auth_path, auth_data, indent=2, sensitive=True)
 
         if sys.stdin.isatty() and not os.getenv("ODYSSEUS_ADMIN_PASSWORD"):
             print(f"  [ok] Admin account created ({username})")
@@ -238,7 +240,7 @@ def check_arch():
 
 
 def main():
-    print("\n=== Odysseus Setup ===\n")
+    print("\n=== Jarvis-AI Setup ===\n")
 
     # Load .env so pre-seeded ODYSSEUS_ADMIN_USER / ODYSSEUS_ADMIN_PASSWORD (and
     # other deployment vars) are honored on native installs, not just when they

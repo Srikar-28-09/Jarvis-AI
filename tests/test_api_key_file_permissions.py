@@ -13,8 +13,11 @@ skipped there.
 import os
 import stat
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
+from cryptography.fernet import Fernet
 
 from src.api_key_manager import APIKeyManager
 
@@ -49,3 +52,45 @@ def test_encrypt_decrypt_roundtrip_still_works(tmp_path):
     enc = mgr.encrypt_api_key("sk-secret")
     assert enc and enc != "sk-secret"
     assert mgr.decrypt_api_key(enc) == "sk-secret"
+
+
+def test_concurrent_first_key_creation_installs_one_complete_key(tmp_path):
+    mgr = APIKeyManager(str(tmp_path))
+    barrier = Barrier(8)
+
+    def create_key():
+        barrier.wait()
+        return mgr.get_or_create_key()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        keys = list(pool.map(lambda _: create_key(), range(8)))
+
+    assert len(set(keys)) == 1
+    assert Fernet(keys[0])
+
+
+def test_api_key_creation_rejects_symlinked_key_file(tmp_path):
+    mgr = APIKeyManager(str(tmp_path))
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-key"
+    outside.write_bytes(Fernet.generate_key())
+    try:
+        os.symlink(outside, mgr.key_file)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is not available")
+
+    with pytest.raises(OSError):
+        mgr.get_or_create_key()
+
+
+def test_api_key_storage_rejects_symlinked_json_file(tmp_path):
+    mgr = APIKeyManager(str(tmp_path))
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-api-keys.json"
+    outside.write_text('{"provider": "preserve"}', encoding="utf-8")
+    try:
+        os.symlink(outside, mgr.api_keys_file)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is not available")
+
+    with pytest.raises(OSError):
+        mgr.save("provider", "new-secret")
+    assert outside.read_text(encoding="utf-8") == '{"provider": "preserve"}'

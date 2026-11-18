@@ -13,8 +13,8 @@ import httpx
 from fastapi import HTTPException
 
 from core.atomic_io import atomic_write_json
-from core.platform_compat import safe_chmod
-from src.secret_storage import decrypt, encrypt, is_encrypted
+from core.secure_files import secure_read_json_at
+from src.secret_storage import decrypt, encrypt_plaintext, is_encrypted
 from src.constants import DATA_DIR, INTEGRATIONS_FILE, SETTINGS_FILE
 
 log = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ def _encrypt_integration_secrets(integrations: List[Dict[str, Any]]) -> List[Dic
         copy = dict(item)
         api_key = copy.get("api_key", "")
         if api_key:
-            copy["api_key"] = encrypt(str(api_key))
+            copy["api_key"] = encrypt_plaintext(str(api_key))
         safe.append(copy)
     return safe
 
@@ -231,31 +231,39 @@ def _join_integration_url(base_url: str, path: str) -> str:
 
 def load_integrations() -> List[Dict[str, Any]]:
     """Load all integrations from disk with secrets decrypted for runtime use."""
-    if not os.path.exists(DATA_FILE):
-        return []
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            integrations = json.load(f)
-        if not isinstance(integrations, list):
-            log.error("Invalid integrations file shape: expected a list")
-            return []
-        valid_integrations = [item for item in integrations if isinstance(item, dict)]
-        if len(valid_integrations) != len(integrations):
-            log.error("Invalid integrations file rows: ignored non-object entries")
-        integrations = valid_integrations
-        if _has_plaintext_api_key(integrations):
-            save_integrations(_decrypt_integration_secrets(integrations))
-        return _decrypt_integration_secrets(integrations)
-    except (json.JSONDecodeError, IOError) as exc:
+        integrations = secure_read_json_at(
+            os.path.dirname(DATA_FILE) or ".",
+            os.path.basename(DATA_FILE),
+        )
+    except FileNotFoundError:
+        return []
+    except OSError:
+        raise
+    except json.JSONDecodeError as exc:
         log.error("Failed to load integrations: %s", exc)
         return []
+    if not isinstance(integrations, list):
+        log.error("Invalid integrations file shape: expected a list")
+        return []
+    valid_integrations = [item for item in integrations if isinstance(item, dict)]
+    if len(valid_integrations) != len(integrations):
+        log.error("Invalid integrations file rows: ignored non-object entries")
+    integrations = valid_integrations
+    if _has_plaintext_api_key(integrations):
+        save_integrations(_decrypt_integration_secrets(integrations))
+    return _decrypt_integration_secrets(integrations)
 
 
 def save_integrations(integrations: List[Dict[str, Any]]) -> None:
     """Persist integrations list to disk with API keys encrypted at rest."""
     _ensure_data_dir()
-    atomic_write_json(DATA_FILE, _encrypt_integration_secrets(integrations), indent=2)
-    safe_chmod(DATA_FILE, 0o600)
+    atomic_write_json(
+        DATA_FILE,
+        _encrypt_integration_secrets(integrations),
+        indent=2,
+        sensitive=True,
+    )
 
 
 def get_integration(integration_id: str) -> Optional[Dict[str, Any]]:

@@ -150,11 +150,11 @@ def set_sqlite_pragma(dbapi_connection, connection_record):
 class EncryptedText(TypeDecorator):
     """Text column transparently encrypted at rest via src.secret_storage.
 
-    Writes are Fernet-encrypted (`enc:` prefix); reads decrypt back to
-    plaintext, so all consumers use the column normally. Legacy plaintext
-    rows pass through unchanged until their next write (a startup migration
-    encrypts them). Protects the SQLite file at rest (stolen backup / leaked
-    image), not a live process that can read the key.
+    Writes use the versioned Fernet envelope; reads decrypt back to plaintext,
+    so all consumers use the column normally. Legacy plaintext rows pass
+    through unchanged until a startup migration encrypts them. Protects the
+    SQLite file at rest (stolen backup / leaked image), not a live process
+    that can read the key.
     """
     impl = Text
     cache_ok = True
@@ -1014,6 +1014,7 @@ def _migrate_add_model_endpoint_owner_column():
     Backfills NULL for existing rows (treated as shared by the filter).
     """
     import sqlite3
+    import json as _json
     db_path = DATABASE_URL.replace("sqlite:///", "")
     if not os.path.exists(db_path):
         return
@@ -1412,8 +1413,14 @@ def _migrate_assign_legacy_owner():
         auth_path = AUTH_FILE
     admin_user = None
     try:
-        with open(auth_path, "r", encoding="utf-8") as f:
-            auth_data = _json.load(f)
+        if not os.path.lexists(auth_path):
+            return
+        from core.secure_files import secure_read_json_at
+
+        auth_data = secure_read_json_at(
+            os.path.dirname(auth_path) or ".",
+            os.path.basename(auth_path),
+        )
         users = auth_data.get("users", {})
         if users:
             for uname, udata in users.items():
@@ -1422,6 +1429,10 @@ def _migrate_assign_legacy_owner():
                     break
             if not admin_user:
                 admin_user = next(iter(users))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise
     except Exception:
         pass
 
@@ -2324,93 +2335,86 @@ def _migrate_add_email_smtp_security():
 
 
 def _migrate_encrypt_endpoint_keys():
-    """Encrypt any plaintext provider API keys in model_endpoints. Idempotent;
-    raw SQL so the EncryptedText decorator isn't applied twice."""
-    try:
-        from src.secret_storage import encrypt, is_encrypted
-    except Exception as e:
-        logger.warning(f"secret_storage import failed; skipping endpoint-key migration: {e}")
-        return
-    try:
-        with engine.connect() as conn:
-            rows = conn.execute(text("SELECT id, api_key FROM model_endpoints")).fetchall()
-            migrated = 0
-            for rid, key in rows:
-                if key and not is_encrypted(key):
-                    conn.execute(text("UPDATE model_endpoints SET api_key = :k WHERE id = :id"),
-                                 {"k": encrypt(key), "id": rid})
+    """Encrypt plaintext provider API keys and upgrade authenticated legacy values."""
+    from src.secret_storage import migrate_encrypted_value
+
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT id, api_key FROM model_endpoints")).fetchall()
+        migrated = 0
+        for rid, key in rows:
+            if key:
+                encrypted = migrate_encrypted_value(key)
+                if encrypted != key:
+                    conn.execute(
+                        text("UPDATE model_endpoints SET api_key = :k WHERE id = :id"),
+                        {"k": encrypted, "id": rid},
+                    )
                     migrated += 1
-            if migrated:
-                conn.commit()
-                logger.info(f"Encrypted plaintext API key on {migrated} endpoint row(s)")
-    except Exception as e:
-        logger.warning(f"Endpoint-key encryption migration skipped: {e}")
+        if migrated:
+            conn.commit()
+            logger.info("Encrypted or upgraded API keys on %s endpoint row(s)", migrated)
 
 
 def _migrate_encrypt_signatures():
-    """Encrypt any plaintext signature images still in the signatures table.
-    Idempotent — rows already prefixed with `enc:` are skipped. Uses raw SQL
-    so the EncryptedText type decorator isn't applied twice."""
-    try:
-        from src.secret_storage import encrypt, is_encrypted
-    except Exception as e:
-        logger.warning(f"secret_storage import failed; skipping signature migration: {e}")
-        return
-    try:
-        with engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT id, data_png, svg FROM signatures"
-            )).fetchall()
-            migrated = 0
-            for rid, data_png, svg in rows:
-                updates = {}
-                if data_png and not is_encrypted(data_png):
-                    updates["data_png"] = encrypt(data_png)
-                if svg and not is_encrypted(svg):
-                    updates["svg"] = encrypt(svg)
-                if updates:
-                    sets = ", ".join(f"{k} = :{k}" for k in updates)
-                    conn.execute(text(f"UPDATE signatures SET {sets} WHERE id = :id"), {**updates, "id": rid})
-                    migrated += 1
-            if migrated:
-                conn.commit()
-                logger.info(f"Encrypted plaintext signature(s) on {migrated} row(s)")
-    except Exception as e:
-        logger.warning(f"Signature encryption migration skipped: {e}")
+    """Encrypt plaintext signatures and upgrade authenticated legacy values."""
+    from src.secret_storage import migrate_encrypted_value
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, data_png, svg FROM signatures"
+        )).fetchall()
+        migrated = 0
+        for rid, data_png, svg in rows:
+            updates = {}
+            if data_png:
+                encrypted = migrate_encrypted_value(data_png)
+                if encrypted != data_png:
+                    updates["data_png"] = encrypted
+            if svg:
+                encrypted = migrate_encrypted_value(svg)
+                if encrypted != svg:
+                    updates["svg"] = encrypted
+            if updates:
+                sets = ", ".join(f"{k} = :{k}" for k in updates)
+                conn.execute(
+                    text(f"UPDATE signatures SET {sets} WHERE id = :id"),
+                    {**updates, "id": rid},
+                )
+                migrated += 1
+        if migrated:
+            conn.commit()
+            logger.info("Encrypted or upgraded signature(s) on %s row(s)", migrated)
 
 
 def _migrate_encrypt_email_passwords():
-    """Encrypt any plaintext IMAP/SMTP passwords still in the email_accounts
-    table. Idempotent — rows already prefixed with `enc:` are skipped.
-    Safe to run on every startup."""
-    try:
-        from src.secret_storage import encrypt, is_encrypted
-    except Exception as e:
-        logger.warning(f"secret_storage import failed; skipping password migration: {e}")
-        return
-    try:
-        with engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT id, imap_password, smtp_password FROM email_accounts"
-            )).fetchall()
-            migrated = 0
-            for row in rows:
-                rid, imap_pw, smtp_pw = row
-                updates = {}
-                if imap_pw and not is_encrypted(imap_pw):
-                    updates["imap_password"] = encrypt(imap_pw)
-                if smtp_pw and not is_encrypted(smtp_pw):
-                    updates["smtp_password"] = encrypt(smtp_pw)
-                if updates:
-                    sets = ", ".join(f"{k} = :{k}" for k in updates)
-                    params = {**updates, "id": rid}
-                    conn.execute(text(f"UPDATE email_accounts SET {sets} WHERE id = :id"), params)
-                    migrated += 1
-            if migrated:
-                conn.commit()
-                logger.info(f"Encrypted plaintext passwords on {migrated} email account row(s)")
-    except Exception as e:
-        logger.warning(f"Password migration failed (will retry next start): {e}")
+    """Encrypt plaintext email passwords and upgrade authenticated legacy values."""
+    from src.secret_storage import migrate_encrypted_value
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, imap_password, smtp_password FROM email_accounts"
+        )).fetchall()
+        migrated = 0
+        for rid, imap_pw, smtp_pw in rows:
+            updates = {}
+            if imap_pw:
+                encrypted = migrate_encrypted_value(imap_pw)
+                if encrypted != imap_pw:
+                    updates["imap_password"] = encrypted
+            if smtp_pw:
+                encrypted = migrate_encrypted_value(smtp_pw)
+                if encrypted != smtp_pw:
+                    updates["smtp_password"] = encrypted
+            if updates:
+                sets = ", ".join(f"{k} = :{k}" for k in updates)
+                conn.execute(
+                    text(f"UPDATE email_accounts SET {sets} WHERE id = :id"),
+                    {**updates, "id": rid},
+                )
+                migrated += 1
+        if migrated:
+            conn.commit()
+            logger.info("Encrypted or upgraded passwords on %s email account row(s)", migrated)
 
 
 def _migrate_add_calendar_is_utc():

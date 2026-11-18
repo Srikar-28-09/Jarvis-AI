@@ -1,7 +1,10 @@
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
+
+import pytest
 
 
 def _load_setup_module():
@@ -24,6 +27,22 @@ def test_create_default_admin_normalizes_env_username(tmp_path, monkeypatch):
     data = json.loads(auth_path.read_text(encoding="utf-8"))
     assert "adminuser" in data["users"]
     assert "AdminUser" not in data["users"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mode bits")
+def test_create_default_admin_uses_private_auth_file(tmp_path, monkeypatch):
+    setup_module = _load_setup_module()
+    auth_path = tmp_path / "auth.json"
+    monkeypatch.setattr(setup_module, "AUTH_FILE", str(auth_path))
+    monkeypatch.setenv("ODYSSEUS_ADMIN_USER", "adminuser")
+    monkeypatch.setenv("ODYSSEUS_ADMIN_PASSWORD", "temporary-password")
+    old_umask = os.umask(0)
+    try:
+        assert setup_module.create_default_admin() == "created"
+    finally:
+        os.umask(old_umask)
+
+    assert auth_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_main_loads_admin_password_from_env_file(tmp_path, monkeypatch):

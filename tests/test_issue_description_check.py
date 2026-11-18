@@ -144,7 +144,7 @@ def test_bug_template_requires_exact_revision():
     template = yaml.safe_load(_BUG_TEMPLATE.read_text())
     revision = next(item for item in template["body"] if item.get("id") == "revision")
     assert revision["type"] == "input"
-    assert revision["attributes"]["label"] == "Odysseus Revision"
+    assert revision["attributes"]["label"] == "Jarvis-AI Revision"
     assert "git show -s --abbrev=12 --format='%h (%cs)' HEAD" in revision["attributes"]["description"]
     assert revision["attributes"]["placeholder"] == "1fef4929cf1d (2026-08-11)"
     assert revision["validations"]["required"] is True

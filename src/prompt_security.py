@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
 
 
@@ -29,19 +30,26 @@ UNTRUSTED_CONTEXT_HEADER = (
 
 GUARD_OPEN = "<<<UNTRUSTED_SOURCE_DATA>>>"
 GUARD_CLOSE = "<<<END_UNTRUSTED_SOURCE_DATA>>>"
+_GUARD_OPEN_RE = re.compile(
+    r"<<<\s*UNTRUSTED\s*_\s*SOURCE\s*_\s*DATA\s*>>>", re.IGNORECASE
+)
+_GUARD_CLOSE_RE = re.compile(
+    r"<<<\s*END\s*_\s*UNTRUSTED\s*_\s*SOURCE\s*_\s*DATA\s*>>>",
+    re.IGNORECASE,
+)
 
 
 def _escape_guard_markers(text: str) -> str:
     """Neutralise delimiter literals inside untrusted text.
 
-    If an attacker embeds the exact guard marker strings they can
+    If an attacker embeds a case or spacing variant of a guard marker they can
     prematurely close the sandbox block and inject instructions outside
     it.  Replacing them with a visually distinct but structurally inert
     token prevents the breakout while preserving the original meaning
     for human review.
     """
-    text = text.replace(GUARD_OPEN, "<<<_UNTRUSTED_DATA>>>")
-    text = text.replace(GUARD_CLOSE, "<<<_END_UNTRUSTED_DATA>>>")
+    text = _GUARD_OPEN_RE.sub("<<<_UNTRUSTED_DATA>>>", text)
+    text = _GUARD_CLOSE_RE.sub("<<<_END_UNTRUSTED_DATA>>>", text)
     return text
 
 

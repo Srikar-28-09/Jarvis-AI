@@ -164,9 +164,17 @@ def find_admin_user() -> str | None:
     falling back to the first user."""
     auth_path = AUTH_FILE
     try:
-        with open(auth_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        from core.secure_files import secure_read_json_at
+
+        data = secure_read_json_at(
+            os.path.dirname(auth_path) or ".",
+            os.path.basename(auth_path),
+        )
+    except FileNotFoundError:
+        return None
+    except PermissionError:
+        raise
+    except json.JSONDecodeError:
         return None
     if not isinstance(data, dict):
         return None

@@ -870,8 +870,8 @@ def setup_contacts_routes():
                 else:
                     value = data[key]
                     if key == "carddav_password" and value:
-                        from src.secret_storage import encrypt
-                        value = encrypt(value)
+                        from src.secret_storage import encrypt_plaintext
+                        value = encrypt_plaintext(value)
                     settings[key] = value
         _save_settings(settings)
         # Force re-fetch

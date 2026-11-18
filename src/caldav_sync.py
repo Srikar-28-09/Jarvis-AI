@@ -635,8 +635,9 @@ async def sync_caldav(owner: str) -> dict:
         label = acc.get("label") or url or account_id
         try:
             pw = decrypt(pw)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not decrypt CalDAV password for %s: %s", label, exc)
+            pw = ""
         if not (url and user and pw):
             totals["errors"].append(f"{label}: missing URL, username, or password")
             continue

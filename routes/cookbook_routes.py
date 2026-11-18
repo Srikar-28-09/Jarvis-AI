@@ -418,8 +418,8 @@ def setup_cookbook_routes() -> APIRouter:
         return decrypt(value)
 
     def _encrypt_secret(value: str) -> str:
-        from src.secret_storage import encrypt
-        return encrypt(value)
+        from src.secret_storage import encrypt_plaintext
+        return encrypt_plaintext(value)
 
     def _strip_task_secrets(state):
         tasks = state.get("tasks") if isinstance(state, dict) else None

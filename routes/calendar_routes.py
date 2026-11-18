@@ -878,8 +878,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         acc["url"] = validated_url
         acc["username"] = (body.get("username") or "").strip()
         if body.get("password"):
-            from src.secret_storage import encrypt
-            acc["password"] = encrypt(body["password"])
+            from src.secret_storage import encrypt_plaintext
+            acc["password"] = encrypt_plaintext(body["password"])
         new_accounts = [acc] + (accounts[1:] if len(accounts) > 1 else [])
         _save_caldav_accounts(owner, new_accounts)
         return {"ok": True}
@@ -926,13 +926,13 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             raise HTTPException(400, str(e))
         if not body.get("password"):
             raise HTTPException(400, "Password is required")
-        from src.secret_storage import encrypt
+        from src.secret_storage import encrypt_plaintext
         new_acc = {
             "id": str(_uuid.uuid4()),
             "label": (body.get("label") or "").strip() or "CalDAV",
             "url": url,
             "username": (body.get("username") or "").strip(),
-            "password": encrypt(body["password"]),
+            "password": encrypt_plaintext(body["password"]),
         }
         accounts = _get_caldav_accounts(owner)
         accounts.append(new_acc)
@@ -963,8 +963,8 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         if body.get("username") is not None:
             acc["username"] = (body.get("username") or "").strip()
         if body.get("password"):
-            from src.secret_storage import encrypt
-            acc["password"] = encrypt(body["password"])
+            from src.secret_storage import encrypt_plaintext
+            acc["password"] = encrypt_plaintext(body["password"])
         accounts[idx] = acc
         _save_caldav_accounts(owner, accounts)
         return {"ok": True}

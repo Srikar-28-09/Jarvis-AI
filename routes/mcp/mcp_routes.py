@@ -11,6 +11,11 @@ from fastapi.responses import RedirectResponse, HTMLResponse
 import logging
 import httpx
 
+from core.secure_files import (
+    secure_file_exists_at,
+    secure_read_json_at,
+    secure_write_json_at,
+)
 from core.database import McpServer, SessionLocal
 from core.middleware import require_admin
 from src.constants import DATA_DIR, MCP_OAUTH_DIR
@@ -23,7 +28,39 @@ router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 def _mcp_oauth_base_dir() -> Path:
     """Directory that may contain OAuth files managed by Odysseus."""
-    return Path(MCP_OAUTH_DIR).resolve(strict=False)
+    return Path(os.path.abspath(MCP_OAUTH_DIR))
+
+
+def _mcp_oauth_relative_path(filepath: str) -> str:
+    base = _mcp_oauth_base_dir()
+    path = Path(os.path.abspath(filepath))
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError as exc:
+        raise ValueError("OAuth file path must stay under the managed directory") from exc
+
+
+def _read_mcp_oauth_json(filepath: str):
+    """Read an OAuth JSON file without following symlinks beneath its root."""
+    relative = _mcp_oauth_relative_path(filepath)
+    base = _mcp_oauth_base_dir()
+    relative_to_data = (Path(base.name) / relative).as_posix()
+    return secure_read_json_at(str(base.parent), relative_to_data)
+
+
+def _mcp_oauth_file_exists(filepath: str) -> bool:
+    relative = _mcp_oauth_relative_path(filepath)
+    base = _mcp_oauth_base_dir()
+    relative_to_data = (Path(base.name) / relative).as_posix()
+    return secure_file_exists_at(str(base.parent), relative_to_data)
+
+
+def _write_mcp_oauth_json(filepath: str, data) -> None:
+    """Atomically write OAuth JSON beneath its private managed directory."""
+    relative = _mcp_oauth_relative_path(filepath)
+    base = _mcp_oauth_base_dir()
+    relative_to_data = (Path(base.name) / relative).as_posix()
+    secure_write_json_at(str(base.parent), relative_to_data, data, indent=2)
 
 
 def _resolve_mcp_oauth_path(raw_path, field_name: str) -> str:
@@ -36,7 +73,7 @@ def _resolve_mcp_oauth_path(raw_path, field_name: str) -> str:
     path = Path(os.path.expanduser(raw))
     if not path.is_absolute():
         path = base / path
-    resolved = path.resolve(strict=False)
+    resolved = Path(os.path.abspath(path))
 
     try:
         resolved.relative_to(base)
@@ -75,7 +112,13 @@ def _mcp_oauth_token_missing(oauth_cfg, *, strict: bool = True) -> bool:
             raise
         logger.warning("Ignoring MCP OAuth config with unsafe token_file")
         return True
-    return bool(token_file and not os.path.exists(token_file))
+    try:
+        return bool(token_file and not _mcp_oauth_file_exists(token_file))
+    except (OSError, ValueError):
+        if strict:
+            raise
+        logger.warning("Ignoring MCP OAuth config with unsafe token_file")
+        return True
 
 
 def _apply_mcp_oauth_env(env: dict, oauth_cfg) -> None:
@@ -203,7 +246,6 @@ def setup_mcp_routes(mcp_manager: McpManager):
         _apply_mcp_oauth_env(parsed_env, parsed_oauth_config)
 
         # Write OAuth credentials file if provided (for Google MCP servers)
-        logger.info(f"MCP add_server: oauth_file={oauth_file!r}")
         if oauth_file:
             try:
                 oauth_data = json.loads(oauth_file)
@@ -216,7 +258,6 @@ def setup_mcp_routes(mcp_manager: McpManager):
                         Path(oauth_dir) / str(oauth_filename),
                         "filename",
                     )
-                    os.makedirs(os.path.dirname(filepath), exist_ok=True)
                     creds = {
                         "installed": {
                             "client_id": client_id,
@@ -226,8 +267,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
                             "token_uri": "https://accounts.google.com/o/oauth2/token",
                         }
                     }
-                    with open(filepath, "w", encoding="utf-8") as f:
-                        json.dump(creds, f, indent=2)
+                    _write_mcp_oauth_json(filepath, creds)
                     logger.info(f"Wrote OAuth credentials to {filepath}")
                     parsed_env.pop("GOOGLE_CLIENT_ID", None)
                     parsed_env.pop("GOOGLE_CLIENT_SECRET", None)
@@ -439,11 +479,13 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
             oauth_cfg = _sanitize_mcp_oauth_config(json.loads(srv.oauth_config))
             keys_file = oauth_cfg.get("keys_file", "")
-            if not keys_file or not os.path.exists(keys_file):
+            if not keys_file:
                 raise HTTPException(400, "OAuth keys file not found")
 
-            with open(keys_file, encoding="utf-8") as f:
-                keys_data = json.load(f)
+            try:
+                keys_data = _read_mcp_oauth_json(keys_file)
+            except FileNotFoundError as exc:
+                raise HTTPException(400, "OAuth keys file not found") from exc
             keys = keys_data.get("installed") or keys_data.get("web")
             if not keys:
                 raise HTTPException(400, "Invalid OAuth keys file format")
@@ -536,8 +578,7 @@ def setup_mcp_routes(mcp_manager: McpManager):
             if not keys_file or not token_file:
                 raise HTTPException(400, "OAuth keys/token file not configured")
 
-            with open(keys_file, encoding="utf-8") as f:
-                keys_data = json.load(f)
+            keys_data = _read_mcp_oauth_json(keys_file)
             keys = keys_data.get("installed") or keys_data.get("web")
             client_id = keys["client_id"]
             client_secret = keys["client_secret"]
@@ -558,16 +599,14 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
             if resp.status_code != 200:
                 err = resp.text
-                logger.error(f"OAuth token exchange failed: {err}")
+                logger.error("OAuth token exchange failed with status %s", resp.status_code)
                 return HTMLResponse(_oauth_result_page("Authorization Failed", f"Google returned an error: {err}"), status_code=400)
 
             tokens = resp.json()
             logger.info(f"OAuth tokens received for server {server_id}")
 
             # Save tokens to the file the MCP package expects
-            os.makedirs(os.path.dirname(token_file), exist_ok=True)
-            with open(token_file, "w", encoding="utf-8") as f:
-                json.dump(tokens, f, indent=2)
+            _write_mcp_oauth_json(token_file, tokens)
             logger.info(f"Saved OAuth tokens to {token_file}")
 
             # Attempt to connect the MCP server now

@@ -80,6 +80,24 @@ _SERVER_OWNED_OAUTH_FIELDS = {
 }
 
 
+def _encrypt_email_password(value: str) -> str:
+    """Encrypt a supplied password while preserving authenticated ciphertext."""
+    if not value:
+        return ""
+    from src.secret_storage import (
+        AmbiguousLegacySecretError,
+        encrypt_plaintext,
+        is_encrypted,
+    )
+
+    try:
+        if is_encrypted(value):
+            return value
+    except AmbiguousLegacySecretError:
+        pass
+    return encrypt_plaintext(value)
+
+
 def _normalized_mail_host(value) -> str:
     """Normalize a mail hostname for exact provider-bound comparisons."""
     return str(value or "").strip().lower().rstrip(".")
@@ -5561,11 +5579,10 @@ def setup_email_routes():
                     setattr(row, col_name, val)
             # Passwords: only update when a non-empty value is given.
             # Stored encrypted; see src/secret_storage.py.
-            from src.secret_storage import encrypt as _enc
             if data.get("imap_password"):
-                row.imap_password = _enc(data["imap_password"])
+                row.imap_password = _encrypt_email_password(data["imap_password"])
             if data.get("smtp_password"):
-                row.smtp_password = _enc(data["smtp_password"])
+                row.smtp_password = _encrypt_email_password(data["smtp_password"])
             clear_q = db.query(EmailAccount).filter(EmailAccount.id != row.id)
             clear_q = _email_account_owner_scope(clear_q, owner)
             clear_q.update({EmailAccount.is_default: False})
@@ -5649,7 +5666,6 @@ def setup_email_routes():
     async def create_email_account(data: dict, owner: str = Depends(require_owner)):
         """Create a new email account."""
         from core.database import SessionLocal, EmailAccount
-        from src.secret_storage import encrypt as _enc
         import uuid as _uuid
         name = (data.get("name") or "").strip()
         if not name:
@@ -5671,13 +5687,13 @@ def setup_email_routes():
                 imap_host=(data.get("imap_host") or "").strip(),
                 imap_port=imap_port,
                 imap_user=(data.get("imap_user") or "").strip(),
-                imap_password=_enc(data.get("imap_password") or ""),
+                imap_password=_encrypt_email_password(data.get("imap_password") or ""),
                 imap_starttls=bool(data.get("imap_starttls", True)),
                 smtp_host=(data.get("smtp_host") or "").strip(),
                 smtp_port=smtp_port,
                 smtp_security=_smtp_security_mode({"smtp_security": data.get("smtp_security"), "smtp_port": smtp_port}),
                 smtp_user=(data.get("smtp_user") or "").strip(),
-                smtp_password=_enc(data.get("smtp_password") or ""),
+                smtp_password=_encrypt_email_password(data.get("smtp_password") or ""),
                 from_address=(data.get("from_address") or "").strip(),
                 display_name=(data.get("display_name") or "").strip(),
                 # SECURITY: stamp the creator so all subsequent reads / mutations
@@ -5728,11 +5744,10 @@ def setup_email_routes():
                     setattr(row, key, bool(data[key]))
             # Passwords — only overwrite when a non-empty value is
             # provided. Stored encrypted; see src/secret_storage.py.
-            from src.secret_storage import encrypt as _enc
             if data.get("imap_password"):
-                row.imap_password = _enc(data["imap_password"])
+                row.imap_password = _encrypt_email_password(data["imap_password"])
             if data.get("smtp_password"):
-                row.smtp_password = _enc(data["smtp_password"])
+                row.smtp_password = _encrypt_email_password(data["smtp_password"])
             db.commit()
             return {"ok": True, "id": row.id}
         finally:

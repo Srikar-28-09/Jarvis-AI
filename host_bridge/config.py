@@ -302,34 +302,14 @@ def get_or_create_bridge_token() -> str:
     if token:
         return token
 
-    # Check shared workspace directory
     ws_path = Path(HOST_WORKSPACE_DIR)
-    try:
-        ws_path.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    from core.secure_files import secure_load_or_create_key
 
-    if ws_path.exists() and ws_path.is_dir():
-        token_file = ws_path / TOKEN_FILENAME
-        try:
-            if token_file.exists():
-                existing = token_file.read_text(encoding="utf-8").strip()
-                if existing:
-                    return existing
-            # Generate new token and write with restricted permissions (0600 on POSIX)
-            new_token = secrets.token_hex(32)
-            try:
-                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-                mode = 0o600
-                fd = os.open(str(token_file), flags, mode)
-                with open(fd, "w", encoding="utf-8") as f:
-                    f.write(new_token)
-            except Exception:
-                token_file.write_text(new_token, encoding="utf-8")
-            return new_token
-        except Exception:
-            pass
-
-    # Fallback to in-memory random token
-    return secrets.token_hex(32)
-
+    token_file = ws_path / TOKEN_FILENAME
+    token = secure_load_or_create_key(
+        str(token_file),
+        lambda: secrets.token_hex(32).encode("ascii"),
+    ).decode("ascii").strip()
+    if not token:
+        raise ValueError(f"Host Bridge token file is empty: {token_file}")
+    return token
