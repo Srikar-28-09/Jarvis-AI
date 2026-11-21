@@ -124,7 +124,10 @@ def _drive_scheduler(monkeypatch, pre_start_setup=None):
         await sch._check_due_tasks()
         return dispatched
 
-    all_dispatched = asyncio.run(_drive())
+    try:
+        all_dispatched = asyncio.run(_drive())
+    finally:
+        sch._release_process_lock()
     # start() also fires the long-lived _loop and _note_pings_loop as tasks
     # (stubbed to _never here); filter those out so the test only counts
     # real per-poll task dispatches.

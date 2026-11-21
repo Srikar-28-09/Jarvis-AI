@@ -12,7 +12,7 @@ import json
 import re
 import time
 import logging
-from typing import Any, AsyncGenerator, List, Dict, Optional, Set
+from typing import AbstractSet, Any, AsyncGenerator, List, Dict, Optional, Set
 from urllib.parse import urlparse
 
 from src.llm_core import (
@@ -3532,7 +3532,7 @@ async def stream_agent_loop(
     relevant_tools: Optional[Set[str]] = None,
     fallbacks: Optional[List[tuple]] = None,
     route_descriptors: Optional[List[dict]] = None,
-    fallback_statuses: Optional[Set[int]] = None,
+    fallback_statuses: Optional[AbstractSet[int]] = None,
     fallback_on_empty: bool = True,
     plan_mode: bool = False,
     approved_plan: Optional[str] = None,
@@ -3548,6 +3548,7 @@ async def stream_agent_loop(
     history_session=None,
     defer_context_shaping: bool = False,
     navigation_allowlist: Optional[Set[str]] = None,
+    tool_allowlist: Optional[Set[str]] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -5794,6 +5795,17 @@ async def stream_agent_loop(
                     "blocked": True,
                     "policy": "current_tool_policy",
                 }
+            elif tool_allowlist is not None and block.tool_type not in tool_allowlist:
+                desc = f"{block.tool_type}: BLOCKED"
+                result = {
+                    "error": (
+                        f"Tool '{block.tool_type}' is outside the current "
+                        "task-plan step allowlist."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "task_plan_tool_allowlist",
+                }
                 logger.info(
                     "Tool blocked before approval by current policy: %s",
                     block.tool_type,
@@ -6114,7 +6126,14 @@ async def stream_agent_loop(
                 output_text = _truncate(result["error"])
 
             # Emit tool_output (include ui_event data if present)
-            tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
+            tool_output_data = {
+                "type": "tool_output",
+                "tool": block.tool_type,
+                "command": cmd_display,
+                "output": output_text,
+                "exit_code": result.get("exit_code"),
+                "success": tool_result_is_successful(result),
+            }
             if is_doc_tool and "action" in result:
                 tool_output_data.update({
                     "doc_id": result.get("doc_id"),

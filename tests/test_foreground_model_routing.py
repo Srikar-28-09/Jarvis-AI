@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import typing
 from types import SimpleNamespace
 
 import httpx
@@ -31,6 +32,13 @@ def _collect(gen):
         return [chunk async for chunk in gen]
 
     return asyncio.run(_run())
+
+
+def test_agent_loop_fallback_statuses_accepts_immutable_sets():
+    annotation = typing.get_type_hints(agent_loop.stream_agent_loop)[
+        "fallback_statuses"
+    ]
+    assert annotation == typing.Optional[typing.AbstractSet[int]]
 
 
 class _EmptyQuery:

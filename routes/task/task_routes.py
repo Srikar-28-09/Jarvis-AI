@@ -242,12 +242,26 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
 
 def _run_to_dict(r: TaskRun) -> dict:
     checkpoint = {}
+    action_plan = None
+    action_plan_error = None
     try:
         value = json.loads(getattr(r, "steps", None) or "")
         if isinstance(value, dict) and value.get("version") == 1:
             checkpoint = value
     except (TypeError, ValueError):
         pass
+    encrypted_plan = checkpoint.get("action_plan_encrypted")
+    if encrypted_plan:
+        from src.secret_storage import SecretStorageError, decrypt
+
+        try:
+            action_plan = decrypt(encrypted_plan)
+        except (SecretStorageError, OSError, ValueError):
+            logger.warning(
+                "Could not authenticate encrypted task plan checkpoint for run %s",
+                r.id,
+            )
+            action_plan_error = "Stored plan checkpoint could not be authenticated."
     return {
         "id": r.id,
         "task_id": r.task_id,
@@ -261,6 +275,9 @@ def _run_to_dict(r: TaskRun) -> dict:
         "checkpoint": checkpoint.get("stage"),
         "attempt_count": checkpoint.get("attempt_count"),
         "recovery": checkpoint.get("recovery"),
+        "action_plan": action_plan,
+        "action_plan_error": action_plan_error,
+        "plan_progress": checkpoint.get("plan_progress"),
     }
 
 
@@ -310,6 +327,231 @@ def setup_task_routes(task_scheduler) -> APIRouter:
 
     def _owner(request: Request):
         return get_current_user(request)
+
+    def _action_goal_query(db, owner):
+        from src.action_engine import ACTION_GOAL_PREFIX
+
+        query = db.query(ScheduledTask).filter(
+            ScheduledTask.prompt.like(f"{ACTION_GOAL_PREFIX}%")
+        )
+        return (
+            query.filter(ScheduledTask.owner == owner)
+            if owner
+            else query.filter(ScheduledTask.owner.is_(None))
+        )
+
+    def _action_goal_state(task, latest_run):
+        if latest_run is None:
+            return "running" if task.status == "starting" else "ready"
+        checkpoint = {}
+        try:
+            checkpoint = json.loads(latest_run.steps or "")
+        except (TypeError, ValueError):
+            pass
+        recovery = checkpoint.get("recovery") if isinstance(checkpoint, dict) else None
+        if recovery == "reconciliation_required":
+            return "reconciliation_required"
+        return {
+            "queued": "running",
+            "running": "running",
+            "success": "completed",
+            "error": "failed",
+            "aborted": "paused",
+            "skipped": "failed",
+        }.get(latest_run.status, task.status or "ready")
+
+    @router.post("/action-goals/preview")
+    async def preview_action_goal(request: Request, body: dict):
+        from src.action_engine import (
+            encode_task_prompt,
+            generate_plan,
+            preview_payload,
+        )
+
+        owner = _owner(request)
+        goal = body.get("goal") if isinstance(body, dict) else None
+        try:
+            plan = await generate_plan(goal, owner)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except Exception as exc:
+            logger.warning(
+                "Action goal planning failed (%s)",
+                type(exc).__name__,
+            )
+            raise HTTPException(503, "Could not generate an action plan.") from None
+
+        if plan.clarification_question:
+            return preview_payload("", goal.strip(), plan)
+
+        goal_id = f"goal_{uuid.uuid4().hex}"
+        task = ScheduledTask(
+            id=goal_id,
+            owner=owner,
+            name="Action goal",
+            prompt=encode_task_prompt(goal, plan, goal_id=goal_id),
+            task_type="llm",
+            trigger_type="event",
+            trigger_event="action_goal",
+            status="paused",
+            output_target="session",
+            notifications_enabled=False,
+        )
+        db = SessionLocal()
+        try:
+            db.add(task)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Could not persist action goal preview")
+            raise HTTPException(503, "Could not persist the action goal preview.")
+        finally:
+            db.close()
+        return preview_payload(goal_id, goal.strip(), plan)
+
+    @router.get("/action-goals")
+    async def list_action_goals(request: Request, limit: int = 50):
+        from src.action_engine import decode_task_prompt, preview_payload
+
+        owner = _owner(request)
+        db = SessionLocal()
+        try:
+            tasks = _action_goal_query(db, owner).order_by(
+                ScheduledTask.created_at.desc()
+            ).limit(max(1, min(limit, 100))).all()
+            result = []
+            for task in tasks:
+                try:
+                    payload = decode_task_prompt(task.prompt)
+                    plan = payload["plan"]
+                    from src.action_engine import GeneratedPlan
+                    plan_model = GeneratedPlan.model_validate(plan)
+                    runs = db.query(TaskRun).filter(
+                        TaskRun.task_id == task.id
+                    ).order_by(TaskRun.started_at.desc()).limit(1).all()
+                    latest = runs[0] if runs else None
+                    item = preview_payload(task.id, payload["goal"], plan_model)
+                    item["status"] = _action_goal_state(task, latest)
+                    item["latest_run"] = _run_to_dict(latest) if latest else None
+                    result.append(item)
+                except (KeyError, TypeError, ValueError):
+                    logger.warning("Stored action goal %s is unreadable", task.id)
+            return {"goals": result}
+        finally:
+            db.close()
+
+    @router.get("/action-goals/{goal_id}")
+    async def get_action_goal(request: Request, goal_id: str):
+        from src.action_engine import GeneratedPlan, decode_task_prompt, preview_payload
+
+        owner = _owner(request)
+        db = SessionLocal()
+        try:
+            task = _action_goal_query(db, owner).filter(
+                ScheduledTask.id == goal_id
+            ).first()
+            if not task:
+                raise HTTPException(404, "Action goal not found")
+            try:
+                payload = decode_task_prompt(task.prompt)
+                plan = GeneratedPlan.model_validate(payload["plan"])
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(500, "Stored action goal could not be authenticated.")
+            latest = db.query(TaskRun).filter(
+                TaskRun.task_id == task.id
+            ).order_by(TaskRun.started_at.desc()).first()
+            result = preview_payload(task.id, payload["goal"], plan)
+            result["status"] = _action_goal_state(task, latest)
+            result["latest_run"] = _run_to_dict(latest) if latest else None
+            return result
+        finally:
+            db.close()
+
+    @router.post("/action-goals/{goal_id}/start")
+    async def start_action_goal(request: Request, goal_id: str):
+        from src.action_engine import (
+            decode_task_prompt,
+            plan_is_read_only,
+            GeneratedPlan,
+        )
+
+        owner = _owner(request)
+        db = SessionLocal()
+        try:
+            task = _action_goal_query(db, owner).filter(
+                ScheduledTask.id == goal_id
+            ).first()
+            if not task:
+                raise HTTPException(404, "Action goal not found")
+            try:
+                payload = decode_task_prompt(task.prompt)
+                plan = GeneratedPlan.model_validate(payload["plan"])
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(500, "Stored action goal could not be authenticated.")
+            if not plan_is_read_only(plan):
+                raise HTTPException(
+                    409,
+                    "This plan includes non-read-only actions. Execute those through "
+                    "the interactive agent so each exact action can be approved.",
+                )
+            latest = db.query(TaskRun).filter(
+                TaskRun.task_id == task.id
+            ).order_by(TaskRun.started_at.desc()).first()
+            if latest and latest.status in ("queued", "running"):
+                raise HTTPException(409, "This action goal is already running.")
+            if latest and latest.status == "success":
+                raise HTTPException(409, "This action goal is already complete.")
+            claimed = db.query(ScheduledTask).filter(
+                ScheduledTask.id == task.id,
+                ScheduledTask.owner == owner if owner else ScheduledTask.owner.is_(None),
+                ScheduledTask.status == "paused",
+            ).update(
+                {ScheduledTask.status: "starting"},
+                synchronize_session=False,
+            )
+            if claimed != 1:
+                raise HTTPException(409, "This action goal is already running.")
+            db.commit()
+        finally:
+            db.close()
+        if not await task_scheduler.run_task_now(goal_id):
+            db = SessionLocal()
+            try:
+                latest = db.query(TaskRun).filter(
+                    TaskRun.task_id == goal_id
+                ).order_by(TaskRun.started_at.desc()).first()
+                if not latest or latest.status not in ("queued", "running"):
+                    _action_goal_query(db, owner).filter(
+                        ScheduledTask.id == goal_id,
+                        ScheduledTask.status == "starting",
+                    ).update(
+                        {ScheduledTask.status: "paused"},
+                        synchronize_session=False,
+                    )
+                    db.commit()
+            finally:
+                db.close()
+            raise HTTPException(409, "This action goal is already running.")
+        return {"ok": True, "goal_id": goal_id, "status": "running"}
+
+    @router.post("/action-goals/{goal_id}/pause")
+    async def pause_action_goal(request: Request, goal_id: str):
+        owner = _owner(request)
+        db = SessionLocal()
+        try:
+            task = _action_goal_query(db, owner).filter(
+                ScheduledTask.id == goal_id
+            ).first()
+            if not task:
+                raise HTTPException(404, "Action goal not found")
+            task.status = "paused"
+            db.commit()
+        finally:
+            db.close()
+        stopped = await task_scheduler.stop_task(goal_id)
+        return {"ok": True, "goal_id": goal_id, "status": "paused", "stopped": stopped}
 
     async def _generate_task_name(prompt: str, owner: Optional[str] = None) -> str:
         """Use LLM to generate a short task name from the prompt."""
