@@ -290,6 +290,8 @@ if AUTH_ENABLED:
     import re as _re
     AUTH_EXEMPT_PATTERNS = [
         _re.compile(r"^/api/tasks/[^/]+/webhook/[^/]+/?$"),
+        _re.compile(r"^/api/attention/twilio/status/?$"),
+        _re.compile(r"^/api/attention/twilio/voice/[^/]+/?$"),
     ]
 
     def _is_auth_exempt(path: str) -> bool:
@@ -673,7 +675,6 @@ async def activity_heartbeat():
 from routes.upload_routes import setup_upload_routes
 upload_router, upload_cleanup_func = setup_upload_routes(upload_handler)
 app.include_router(upload_router)
-upload_cleanup_task = None
 
 # Emoji SVG proxy (same-origin, lazy-cached Twemoji) — lets the chat render
 # emojis as flat SVG instead of system color glyphs.
@@ -857,6 +858,10 @@ app.include_router(setup_api_token_routes())
 
 logger.info("Webhook & API token routes initialized")
 
+# Remote attention and telephony escalation
+from routes.attention_routes import setup_attention_routes
+app.include_router(setup_attention_routes(api_key_manager))
+
 # Notes (Google Keep-style notes/todos)
 from routes.note.note_routes import setup_note_routes
 app.include_router(setup_note_routes(task_scheduler, upload_handler=upload_handler))
@@ -1027,16 +1032,46 @@ async def runtime_info() -> Dict[str, object]:
 async def _lifespan(app):
     """Modern lifespan context manager replacing deprecated @app.on_event."""
     # ── STARTUP ──
-    await _startup_event()
-    yield
-    # ── SHUTDOWN ──
-    await _shutdown_event()
+    try:
+        started = await _startup_event()
+    except BaseException:
+        await _shutdown_event()
+        raise
+    try:
+        yield
+    finally:
+        if started:
+            await _shutdown_event()
 
 app.router.lifespan_context = _lifespan
 
 
-async def _startup_event():
-    global upload_cleanup_task
+def _track_startup_task(task: asyncio.Task, name: str) -> asyncio.Task:
+    task.set_name(name)
+    app.state._startup_tasks.append(task)
+
+    def _log_failure(done_task: asyncio.Task) -> None:
+        if done_task.cancelled():
+            return
+        error = done_task.exception()
+        if error is not None:
+            logger.error(
+                "Application background task %s failed",
+                done_task.get_name(),
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    task.add_done_callback(_log_failure)
+    return task
+
+
+async def _startup_event() -> bool:
+    if getattr(app.state, "_lifecycle_running", False):
+        logger.debug("Application startup already has an active lifecycle owner")
+        return False
+
+    app.state._lifecycle_running = True
+    app.state._startup_tasks = []
     logger.info("Application starting up...")
     webhook_manager.set_loop(asyncio.get_running_loop())
     # Wipe any leftover incognito sessions from previous process — they're
@@ -1058,15 +1093,16 @@ async def _startup_event():
         logger.debug(f"Incognito purge skipped: {e}")
     # Strong refs to fire-and-forget startup tasks. Without this, Python may
     # GC tasks created with `asyncio.create_task(...)` before they finish.
-    _startup_tasks: list[asyncio.Task] = getattr(app.state, "_startup_tasks", [])
-    app.state._startup_tasks = _startup_tasks
     if upload_cleanup_func:
-        upload_cleanup_task = asyncio.create_task(upload_cleanup_func())
+        _track_startup_task(
+            asyncio.create_task(upload_cleanup_func()),
+            "upload-rate-limit-cleanup",
+        )
     # Always-on monitor that auto-continues the agent when a background bash
     # job (#!bg) finishes — re-invokes the turn with the job output.
     try:
         from src.bg_monitor import start_bg_monitor
-        _startup_tasks.append(start_bg_monitor())
+        _track_startup_task(start_bg_monitor(), "background-job-monitor")
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
     # MCP servers can be slow or blocked by local tooling. Connect them after
@@ -1074,22 +1110,49 @@ async def _startup_event():
     async def _startup_mcp_connections():
         try:
             from src.builtin_mcp import register_builtin_servers
-            await register_builtin_servers(mcp_manager)
-        except BaseException as e:
+            builtin_tasks = await register_builtin_servers(mcp_manager)
+            for task in builtin_tasks:
+                _track_startup_task(task, task.get_name())
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
             logger.warning(f"Built-in MCP registration failed (non-critical): {type(e).__name__}: {e}")
         try:
             await mcp_manager.connect_all_enabled()
+        except asyncio.CancelledError:
+            raise
         except asyncio.TimeoutError:
             logger.warning("User MCP startup timed out (non-critical)")
-        except BaseException as e:
+        except Exception as e:
             logger.warning(f"MCP startup failed (non-critical): {type(e).__name__}: {e}")
 
-    _startup_tasks.append(asyncio.create_task(_startup_mcp_connections()))
+    _track_startup_task(
+        asyncio.create_task(_startup_mcp_connections()),
+        "mcp-startup",
+    )
 
     # Startup warmups are opt-in. They make later requests a little warmer, but
     # they also compete with the first seconds of real UI use on slow or busy
     # machines. Default to clear/idle startup and let requests warm what they use.
     _startup_warmups_enabled = str(os.getenv("ODYSSEUS_STARTUP_WARMUPS", "")).lower() in {"1", "true", "yes", "on"}
+
+    async def _warmup_endpoints():
+        try:
+            import httpx
+            urls = (
+                await asyncio.to_thread(model_discovery.warmup_ping_urls)
+                if model_discovery else []
+            )
+            for url in urls:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        await client.get(url)
+                    logger.info(f"Warmup ping OK: {url}")
+                except Exception as e:
+                    logger.debug(f"Warmup ping failed for endpoint: {e}")
+        except Exception as e:
+            logger.debug(f"Warmup ping skipped: {e}")
+
     if _startup_warmups_enabled:
         async def _warmup_tool_index():
             try:
@@ -1101,26 +1164,14 @@ async def _startup_event():
             except Exception as e:
                 logger.warning(f"Tool index warmup failed (non-critical): {type(e).__name__}: {e}")
 
-        _startup_tasks.append(asyncio.create_task(_warmup_tool_index()))
-
-        async def _warmup_endpoints():
-            try:
-                import httpx
-                urls = (
-                    await asyncio.to_thread(model_discovery.warmup_ping_urls)
-                    if model_discovery else []
-                )
-                for url in urls:
-                    try:
-                        async with httpx.AsyncClient(timeout=5.0) as client:
-                            await client.get(url)
-                        logger.info(f"Warmup ping OK: {url}")
-                    except Exception as e:
-                        logger.debug(f"Warmup ping failed for endpoint: {e}")
-            except Exception as e:
-                logger.debug(f"Warmup ping skipped: {e}")
-
-        _startup_tasks.append(asyncio.create_task(_warmup_endpoints()))
+        _track_startup_task(
+            asyncio.create_task(_warmup_tool_index()),
+            "startup-tool-index-warmup",
+        )
+        _track_startup_task(
+            asyncio.create_task(_warmup_endpoints()),
+            "startup-endpoint-warmup",
+        )
     else:
         logger.info("Startup warmups disabled (set ODYSSEUS_STARTUP_WARMUPS=1 to enable)")
 
@@ -1138,7 +1189,10 @@ async def _startup_event():
                     logger.warning(f"Keepalive loop error: {e}")
                     await asyncio.sleep(300)  # Back off on error
 
-        _startup_tasks.append(asyncio.create_task(_keepalive_loop()))
+        _track_startup_task(
+            asyncio.create_task(_keepalive_loop()),
+            "model-keepalive",
+        )
 
     async def _ensure_default_tasks():
         # Create/reconcile default automation tasks + personal assistant for every user.
@@ -1234,6 +1288,16 @@ async def _startup_event():
             "In-process task scheduler disabled (ODYSSEUS_INPROCESS_TASKS=0); "
             "drive task firing externally (e.g. cron)."
         )
+
+    # Persisted remote-attention events are drained locally. Phone escalation
+    # stays disabled unless the provider and recipient are explicitly configured.
+    from src.attention import get_attention_manager
+    attention_manager = get_attention_manager(api_key_manager)
+    _track_startup_task(
+        asyncio.create_task(attention_manager.loop(), name="attention-escalation"),
+        "attention-escalation",
+    )
+
     # Periodic null-owner sweep — re-runs the legacy-owner assignment hourly
     # so any data created while auth was disabled / localhost-bypassed gets
     # claimed by the admin instead of staying world-visible (M19).
@@ -1247,7 +1311,10 @@ async def _startup_event():
                 logger.debug(f"Null-owner sweep skipped: {e}")
                 await asyncio.sleep(3600)
 
-    _startup_tasks.append(asyncio.create_task(_null_owner_sweep_loop()))
+    _track_startup_task(
+        asyncio.create_task(_null_owner_sweep_loop()),
+        "null-owner-sweep",
+    )
 
     # Nightly skill audit — at ~02:00 local, test + judge a batch of the
     # least-recently-checked skills, auto-fixing/escalating weak ones (never
@@ -1277,7 +1344,10 @@ async def _startup_event():
             except Exception as e:
                 logger.warning(f"Nightly skill audit failed: {e}")
 
-    _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
+    _track_startup_task(
+        asyncio.create_task(_skill_audit_nightly_loop()),
+        "nightly-skill-audit",
+    )
 
     # Cookbook serve lifecycle — kills scheduler-launched serves whose
     # window-end has passed. Paired with the cookbook_serve builtin
@@ -1286,7 +1356,10 @@ async def _startup_event():
     # cookbook_serve entry in BUILTIN_ACTIONS + src/cookbook_serve_lifecycle.py
     # removes the feature.
     from src.cookbook_serve_lifecycle import cookbook_serve_lifecycle_loop
-    _startup_tasks.append(asyncio.create_task(cookbook_serve_lifecycle_loop()))
+    _track_startup_task(
+        asyncio.create_task(cookbook_serve_lifecycle_loop()),
+        "cookbook-serve-lifecycle",
+    )
 
     # MCP idle server reaper — periodically disconnects lazy built-in servers
     # that have been idle for > 300 seconds to minimize idle memory usage.
@@ -1296,38 +1369,84 @@ async def _startup_event():
                 await asyncio.sleep(60)
                 await mcp_manager.reap_idle_builtin_servers(idle_timeout_seconds=300)
             except asyncio.CancelledError:
-                break
+                raise
             except Exception as e:
                 logger.debug(f"MCP idle reaper error: {e}")
 
-    _startup_tasks.append(asyncio.create_task(_mcp_idle_reaper_loop()))
+    _track_startup_task(
+        asyncio.create_task(_mcp_idle_reaper_loop()),
+        "mcp-idle-reaper",
+    )
 
     logger.info("Application startup complete")
+    return True
 
 async def _shutdown_event():
+    if not getattr(app.state, "_lifecycle_running", False) and not getattr(
+        app.state, "_startup_tasks", ()
+    ):
+        logger.debug("Application lifecycle is already stopped")
+        return
+
     logger.info("Application shutting down...")
-    if upload_cleanup_task:
-        upload_cleanup_task.cancel()
+
+    cancelled = False
+
+    async def _cleanup(name: str, operation):
+        nonlocal cancelled
         try:
-            await upload_cleanup_task
+            await operation()
         except asyncio.CancelledError:
-            pass
-    # Stop task scheduler (no-op if it never started under the gate)
+            cancelled = True
+            logger.debug("Application shutdown operation %s was cancelled", name)
+        except Exception:
+            logger.exception("Application shutdown operation %s failed", name)
+
     try:
-        await task_scheduler.stop()
-    except Exception:
-        pass
-    # Close webhook manager
-    try:
-        await webhook_manager.close()
-    except Exception as e:
-        logger.warning(f"Webhook manager shutdown error: {e}")
-    # Disconnect all MCP servers
-    try:
-        await mcp_manager.disconnect_all()
-    except Exception as e:
-        logger.warning(f"MCP shutdown error: {e}")
+        # Stop accepting scheduled work before cancelling the other app-owned tasks.
+        await _cleanup("task scheduler", task_scheduler.stop)
+
+        async def _cancel_startup_tasks():
+            startup_tasks = list(getattr(app.state, "_startup_tasks", ()))
+            for task in startup_tasks:
+                if not task.done():
+                    task.cancel()
+            if startup_tasks:
+                results = await asyncio.gather(
+                    *startup_tasks,
+                    return_exceptions=True,
+                )
+                for task, result in zip(startup_tasks, results):
+                    if isinstance(result, BaseException) and not isinstance(
+                        result, asyncio.CancelledError
+                    ):
+                        logger.error(
+                            "Application background task %s failed during shutdown",
+                            task.get_name(),
+                            exc_info=(type(result), result, result.__traceback__),
+                        )
+
+        await _cleanup("application background tasks", _cancel_startup_tasks)
+
+        # Drain registrations created before the startup owner received handles.
+        try:
+            from src.builtin_mcp import cancel_builtin_server_startup_tasks
+            await cancel_builtin_server_startup_tasks()
+        except asyncio.CancelledError:
+            cancelled = True
+            logger.debug("Built-in MCP startup task cleanup was cancelled")
+        except Exception:
+            logger.exception("Built-in MCP startup task cleanup failed")
+
+        await _cleanup("webhook manager", webhook_manager.close)
+        await _cleanup("MCP manager", mcp_manager.disconnect_all)
+    finally:
+        app.state._startup_tasks = []
+        app.state._lifecycle_running = False
+
     logger.info("Application shutdown complete")
+    if cancelled:
+        raise asyncio.CancelledError
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -42,6 +43,7 @@ from src.constants import BG_JOBS_DIR, BG_JOBS_FILE
 
 _JOBS_DIR = Path(BG_JOBS_DIR)
 _STORE = Path(BG_JOBS_FILE)
+_FOLLOWUP_LOCK = threading.Lock()
 
 # A job that runs longer than this is presumed stuck and reaped (the agent
 # still gets a "timed out" follow-up so nothing hangs forever).
@@ -90,6 +92,7 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
     job_id = uuid.uuid4().hex[:12]
     log_path = _JOBS_DIR / f"{job_id}.log"
     exit_path = _JOBS_DIR / f"{job_id}.exit"
+    pid_path = _JOBS_DIR / f"{job_id}.pid"
 
     # The user command goes in its OWN script file, run as a child `bash`. This
     # is what isolates it: an `exit` inside it only ends that child (so the
@@ -108,9 +111,13 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         # handles drive paths and spaces correctly.
         cmd_path = _JOBS_DIR / f"{job_id}.cmd.sh"
         cmd_path.write_text(command + "\n", encoding="utf-8")
-        lp, xp, cp = (shlex.quote(git_bash_path(p)) for p in (log_path, exit_path, cmd_path))
+        lp, xp, cp, pp = (
+            shlex.quote(git_bash_path(p))
+            for p in (log_path, exit_path, cmd_path, pid_path)
+        )
         script_path = _JOBS_DIR / f"{job_id}.sh"
         script_path.write_text(
+            f"echo $$ > {pp}\n"
             f"bash {cp} > {lp} 2>&1\n"
             f"echo $? > {xp}\n",
             encoding="utf-8",
@@ -130,21 +137,12 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         )
         argv = [os.environ.get("ComSpec", "cmd.exe"), "/c", str(script_path)]
 
-    proc = subprocess.Popen(
-        argv,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        cwd=cwd or None,
-        **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
-    )
-
     rec = {
         "id": job_id,
         "session_id": session_id,
         "command": command,
-        "status": "running",       # running | done | failed
-        "pid": proc.pid,
+        "status": "launching",     # launching | running | done | failed
+        "pid": None,
         "started_at": time.time(),
         "ended_at": None,
         "exit_code": None,
@@ -152,8 +150,35 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         "followed_up": False,       # has the agent been re-invoked with the result?
         "log_path": str(log_path),
         "exit_path": str(exit_path),
+        "pid_path": str(pid_path),
     }
     jobs = _load()
+    jobs[job_id] = rec
+    _save(jobs)
+
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            cwd=cwd or None,
+            **detached_popen_kwargs(),  # detach from the request lifecycle (setsid / DETACHED_PROCESS)
+        )
+    except Exception as exc:
+        rec["status"] = "failed"
+        rec["exit_code"] = -1
+        rec["ended_at"] = time.time()
+        rec["launch_error"] = type(exc).__name__
+        rec["followed_up"] = True
+        rec["followup_state"] = "complete"
+        rec["followup_checkpoint"] = "launch_failed"
+        jobs[job_id] = rec
+        _save(jobs)
+        raise
+
+    rec["status"] = "running"
+    rec["pid"] = proc.pid
     jobs[job_id] = rec
     _save(jobs)
     return rec
@@ -195,6 +220,40 @@ def refresh() -> Dict[str, Dict[str, Any]]:
     changed = False
     now = time.time()
     for rec in jobs.values():
+        if rec.get("status") == "launching":
+            exit_path = Path(rec.get("exit_path", ""))
+            pid = rec.get("pid")
+            if not pid:
+                try:
+                    pid = int(
+                        Path(rec["pid_path"])
+                        .read_text(encoding="utf-8", errors="replace")
+                        .strip()
+                    )
+                except (KeyError, OSError, ValueError):
+                    pid = None
+            if exit_path.exists():
+                try:
+                    code = int(exit_path.read_text(encoding="utf-8", errors="replace").strip() or "1")
+                except Exception:
+                    code = 1
+                rec["pid"] = pid
+                rec["exit_code"] = code
+                rec["status"] = "done" if code == 0 else "failed"
+                rec["ended_at"] = now
+            elif pid and _pid_alive(pid):
+                rec["pid"] = pid
+                rec["status"] = "running"
+            else:
+                rec["status"] = "failed"
+                rec["exit_code"] = -1
+                rec["ended_at"] = now
+                rec["launch_uncertain"] = True
+                rec["followup_state"] = "reconciliation_required"
+                rec["followup_checkpoint"] = "launch_outcome_uncertain"
+            changed = True
+            if rec.get("status") != "running":
+                continue
         if rec.get("status") != "running":
             continue
         exit_path = Path(rec.get("exit_path", ""))
@@ -236,17 +295,72 @@ def _kill(pid: Optional[int]) -> None:
 
 
 def pending_followups() -> List[Dict[str, Any]]:
-    """Finished jobs the agent hasn't been re-invoked for yet. The monitor
-    drains these; mark_followed_up() flips the flag only on success."""
+    """Finished jobs with no follow-up claim or recorded outcome."""
     jobs = refresh()
-    return [r for r in jobs.values()
-            if r.get("status") in ("done", "failed") and not r.get("followed_up")]
+    changed = False
+    for rec in jobs.values():
+        if rec.get("followup_state") != "running":
+            continue
+        pid = rec.get("followup_pid")
+        if pid == os.getpid() or _pid_alive(pid):
+            continue
+        rec["followup_state"] = "reconciliation_required"
+        rec["followup_checkpoint"] = "interrupted"
+        rec["followup_updated_at"] = time.time()
+        changed = True
+    if changed:
+        _save(jobs)
+    return [
+        r for r in jobs.values()
+        if r.get("status") in ("done", "failed")
+        and not r.get("followed_up")
+        and r.get("followup_state") not in ("running", "reconciliation_required", "complete")
+    ]
+
+
+def claim_followup(job_id: str) -> bool:
+    """Persist an at-most-once follow-up claim before agent actions begin."""
+    with _FOLLOWUP_LOCK:
+        jobs = _load()
+        rec = jobs.get(job_id)
+        if (
+            not rec
+            or rec.get("status") not in ("done", "failed")
+            or rec.get("followed_up")
+            or rec.get("followup_state") in (
+                "running",
+                "reconciliation_required",
+                "complete",
+            )
+        ):
+            return False
+        rec["followup_state"] = "running"
+        rec["followup_checkpoint"] = "agent_execution_started"
+        rec["followup_attempts"] = int(rec.get("followup_attempts", 0)) + 1
+        rec["followup_pid"] = os.getpid()
+        rec["followup_started_at"] = time.time()
+        rec["followup_updated_at"] = rec["followup_started_at"]
+        _save(jobs)
+        return True
+
+
+def mark_followup_uncertain(job_id: str) -> None:
+    jobs = _load()
+    rec = jobs.get(job_id)
+    if rec and rec.get("followup_state") == "running":
+        rec["followup_state"] = "reconciliation_required"
+        rec["followup_checkpoint"] = "interrupted"
+        rec["followup_updated_at"] = time.time()
+        _save(jobs)
 
 
 def mark_followed_up(job_id: str) -> None:
     jobs = _load()
     if job_id in jobs:
         jobs[job_id]["followed_up"] = True
+        jobs[job_id]["followup_state"] = "complete"
+        jobs[job_id]["followup_checkpoint"] = "complete"
+        jobs[job_id]["followup_updated_at"] = time.time()
         _save(jobs)
 
 

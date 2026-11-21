@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import json
 import logging
 import os
@@ -137,9 +138,15 @@ async def test_scheduled_local_summary_is_preempted_by_foreground_call(monkeypat
 
     monkeypatch.setenv("ODYSSEUS_LOCAL_MODEL_GATE", "true")
     monkeypatch.setenv("BACKGROUND_TASK_FOREGROUND_GATE", "false")
-    monkeypatch.setattr(llm_core, "_LOCAL_MODEL_LOCK", asyncio.Lock())
+    monkeypatch.setattr(llm_core, "_LOCAL_MODEL_LOCK", threading.Lock())
     monkeypatch.setattr(llm_core, "_LOCAL_MODEL_CURRENT", {})
     monkeypatch.setattr(llm_core, "_LOCAL_MODEL_WAITING_FOREGROUND", 0)
+    from services.hwfit import hardware
+    monkeypatch.setattr(
+        hardware,
+        "get_runtime_resources",
+        lambda: {"available_ram_gb": 8.0, "available_vram_gb": 4.0},
+    )
     monkeypatch.setattr(
         task_endpoint,
         "resolve_task_candidates",

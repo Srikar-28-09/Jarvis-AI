@@ -10,6 +10,7 @@ from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
 from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
+from src.context_orchestrator import rank_memories
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +349,12 @@ class ChatProcessor:
 
             remaining_memory_slots = max(self.MEMORY_CONTEXT_LIMIT - len(self._last_used_memories), 0)
             if extended and remaining_memory_slots:
-                relevant = self._hybrid_retrieve(message, extended, k=remaining_memory_slots)
+                relevant = rank_memories(
+                    extended,
+                    message,
+                    owner=owner,
+                    limit=remaining_memory_slots,
+                )
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(

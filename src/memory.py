@@ -351,10 +351,26 @@ class MemoryManager:
             except Exception:
                 pass
     
-    def add_entry(self, text: str, source: str = "user", category: str = "fact", owner: str = None) -> Dict:
+    def add_entry(
+        self,
+        text: str,
+        source: str = "user",
+        category: str = "fact",
+        owner: str = None,
+        *,
+        confidence: float | None = None,
+        inferred: bool = False,
+        metadata: dict | None = None,
+    ) -> Dict:
         """Add a new memory entry."""
         if not text.strip():
             raise ValueError("Memory text cannot be empty")
+        sensitive_markers = re.compile(
+            r"(?i)(api[_ -]?key|authorization|password|passwd|secret|private[_ -]?key|"
+            r"bearer\s+[A-Za-z0-9._~-]+|(?:sk|pk)[-_][A-Za-z0-9]{12,})"
+        )
+        if sensitive_markers.search(text):
+            raise ValueError("Sensitive secrets must not be stored in memory")
 
         entry = {
             "id": str(uuid.uuid4()),
@@ -366,6 +382,11 @@ class MemoryManager:
         }
         if owner:
             entry["owner"] = owner
+        entry["metadata"] = dict(metadata or {})
+        if confidence is not None:
+            entry["metadata"]["confidence"] = max(0.0, min(1.0, float(confidence)))
+        if inferred:
+            entry["metadata"]["inferred"] = True
         return entry
 
     def increment_uses(self, ids: List[str]) -> None:

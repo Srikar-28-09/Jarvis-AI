@@ -10,7 +10,8 @@ import threading
 import re
 import os
 import math
-from contextlib import asynccontextmanager
+import ipaddress
+from contextlib import asynccontextmanager, contextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
@@ -18,9 +19,12 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-_LOCAL_MODEL_LOCK = asyncio.Lock()
+_LOCAL_MODEL_LOCK = threading.Lock()
+_LOCAL_MODEL_STATE_LOCK = threading.Lock()
 _LOCAL_MODEL_WAITING_FOREGROUND = 0
 _LOCAL_MODEL_CURRENT: Dict[str, object] = {}
+_LOCAL_MODEL_ADMISSION_TIMEOUT_SECONDS = 30.0
+_LOCAL_MODEL_MIN_HEADROOM_GB = 0.6
 
 
 def _normalize_usage_counts(input_value=0, output_value=0):
@@ -78,6 +82,158 @@ def _gate_workload(workload: Optional[str]) -> str:
     return "background" if str(workload or "").lower() == "background" else "foreground"
 
 
+def _is_loopback_endpoint(target_url: str) -> bool:
+    host = (urlparse(target_url).hostname or "").lower()
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+class _LocalModelAdmissionError(HTTPException):
+    """A local model request was rejected before sending it to the provider."""
+
+    def __init__(self, detail: str):
+        super().__init__(503, detail)
+
+
+def _check_local_model_resources(model: str) -> None:
+    try:
+        from services.hwfit.hardware import get_runtime_resources
+
+        resources = get_runtime_resources()
+    except Exception:
+        logger.exception(
+            "[model-admission] resource telemetry failed; keeping serialized admission model=%s",
+            model,
+        )
+        return
+    if not isinstance(resources, dict):
+        logger.warning(
+            "[model-admission] resource telemetry returned an invalid snapshot; keeping serialized admission model=%s",
+            model,
+        )
+        return
+
+    available_ram = resources.get("available_ram_gb")
+    available_vram = resources.get("available_vram_gb")
+    available_ram = (
+        available_ram
+        if isinstance(available_ram, (int, float))
+        and not isinstance(available_ram, bool)
+        and math.isfinite(available_ram)
+        else None
+    )
+    available_vram = (
+        available_vram
+        if isinstance(available_vram, (int, float))
+        and not isinstance(available_vram, bool)
+        and math.isfinite(available_vram)
+        else None
+    )
+    exhausted = (
+        isinstance(available_ram, (int, float))
+        and available_ram < _LOCAL_MODEL_MIN_HEADROOM_GB
+    ) or (
+        isinstance(available_vram, (int, float))
+        and available_vram < _LOCAL_MODEL_MIN_HEADROOM_GB
+    )
+    if exhausted:
+        logger.warning(
+            "[model-admission] rejected local request for low available memory model=%s",
+            model,
+        )
+        raise _LocalModelAdmissionError(
+            "Local model resources are below the safe admission threshold"
+        )
+    if available_ram is None and available_vram is None:
+        logger.warning(
+            "[model-admission] resource telemetry unavailable; keeping serialized admission model=%s",
+            model,
+        )
+
+
+async def _check_local_model_resources_async(model: str) -> None:
+    await asyncio.to_thread(_check_local_model_resources, model)
+
+
+def _register_foreground_wait(model: str) -> None:
+    global _LOCAL_MODEL_WAITING_FOREGROUND
+    with _LOCAL_MODEL_STATE_LOCK:
+        _LOCAL_MODEL_WAITING_FOREGROUND += 1
+        current = dict(_LOCAL_MODEL_CURRENT)
+    task = current.get("task")
+    if current.get("workload") == "background" and isinstance(task, asyncio.Task) and not task.done():
+        logger.info(
+            "[model-gate] cancelling background local model call for foreground request model=%s",
+            model,
+        )
+        try:
+            task.get_loop().call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            logger.warning(
+                "[model-gate] could not cancel background local model call model=%s",
+                current.get("model", "unknown"),
+            )
+
+
+def _try_acquire_local_model_slot(
+    owner,
+    workload: str,
+    target_url: str,
+    model: str,
+    foreground_registered: bool,
+    background_blocked: bool = False,
+) -> tuple[bool, bool]:
+    global _LOCAL_MODEL_WAITING_FOREGROUND
+    with _LOCAL_MODEL_STATE_LOCK:
+        if workload == "background" and (
+            background_blocked or _LOCAL_MODEL_WAITING_FOREGROUND > 0
+        ):
+            return False, foreground_registered
+        if not _LOCAL_MODEL_LOCK.acquire(blocking=False):
+            return False, foreground_registered
+        if foreground_registered:
+            _LOCAL_MODEL_WAITING_FOREGROUND = max(
+                0, _LOCAL_MODEL_WAITING_FOREGROUND - 1
+            )
+            foreground_registered = False
+        _LOCAL_MODEL_CURRENT.clear()
+        _LOCAL_MODEL_CURRENT.update({
+            "task": owner if isinstance(owner, asyncio.Task) else None,
+            "thread": owner if not isinstance(owner, asyncio.Task) else None,
+            "workload": workload,
+            "url": target_url,
+            "model": model,
+            "started": time.time(),
+        })
+        return True, foreground_registered
+
+
+def _release_foreground_wait() -> None:
+    global _LOCAL_MODEL_WAITING_FOREGROUND
+    with _LOCAL_MODEL_STATE_LOCK:
+        _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
+
+
+def _release_local_model_slot(owner, owner_key: str) -> None:
+    with _LOCAL_MODEL_STATE_LOCK:
+        if _LOCAL_MODEL_CURRENT.get(owner_key) is owner:
+            _LOCAL_MODEL_CURRENT.clear()
+        _LOCAL_MODEL_LOCK.release()
+
+
+def _local_slot_timeout(model: str, workload: str) -> _LocalModelAdmissionError:
+    logger.warning(
+        "[model-gate] timed out waiting for local model slot model=%s workload=%s",
+        model,
+        workload,
+    )
+    return _LocalModelAdmissionError("Timed out waiting for the local model slot")
+
+
 @asynccontextmanager
 async def _local_model_slot(target_url: str, model: str, workload: Optional[str] = None):
     """Serialize local model traffic, with foreground chat taking priority.
@@ -91,63 +247,105 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
         yield
         return
 
-    global _LOCAL_MODEL_WAITING_FOREGROUND
     kind = _gate_workload(workload)
     current_task = asyncio.current_task()
     slot_wait_started = time.perf_counter()
+    deadline = asyncio.get_running_loop().time() + _LOCAL_MODEL_ADMISSION_TIMEOUT_SECONDS
+    foreground_registered = kind == "foreground"
     if kind == "foreground":
-        _LOCAL_MODEL_WAITING_FOREGROUND += 1
-        current = dict(_LOCAL_MODEL_CURRENT)
-        if current.get("workload") == "background":
-            task = current.get("task")
-            if isinstance(task, asyncio.Task) and not task.done():
-                logger.info(
-                    "[model-gate] cancelling background local model call for foreground request model=%s",
-                    model,
-                )
-                task.cancel()
-    else:
-        # Background work should not jump in while the browser/chat is active
-        # or while a foreground request is waiting to acquire the local model.
-        try:
-            from src.interactive_gate import has_foreground_activity
-        except Exception:
-            has_foreground_activity = lambda: False  # type: ignore
-        while _LOCAL_MODEL_WAITING_FOREGROUND > 0 or has_foreground_activity():
-            await asyncio.sleep(0.25)
+        _register_foreground_wait(model)
 
     acquired = False
     try:
         try:
-            await _LOCAL_MODEL_LOCK.acquire()
-        except BaseException:
+            if kind == "background":
+                try:
+                    from src.interactive_gate import has_foreground_activity
+                except Exception:
+                    has_foreground_activity = lambda: False  # type: ignore
+            else:
+                has_foreground_activity = lambda: False
+
+            while True:
+                background_blocked = (
+                    kind == "background" and has_foreground_activity()
+                )
+                acquired, foreground_registered = _try_acquire_local_model_slot(
+                    current_task,
+                    kind,
+                    target_url,
+                    model,
+                    foreground_registered,
+                    background_blocked,
+                )
+                if acquired:
+                    break
+                if background_blocked:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise _local_slot_timeout(model, kind)
+                    await asyncio.sleep(min(0.25, remaining))
+                    continue
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise _local_slot_timeout(model, kind)
+                await asyncio.sleep(min(0.1, remaining))
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise _local_slot_timeout(model, kind)
+            from src.request_timing import log_stage
+            log_stage("model_slot_wait", (time.perf_counter() - slot_wait_started) * 1000,
+                      workload=kind)
+            if _is_loopback_endpoint(target_url):
+                await _check_local_model_resources_async(model)
+            yield
+        except asyncio.CancelledError:
             from src.request_timing import log_stage
             log_stage("model_slot_wait", (time.perf_counter() - slot_wait_started) * 1000,
                       outcome="cancelled", workload=kind)
             raise
-        acquired = True
-        from src.request_timing import log_stage
-        log_stage("model_slot_wait", (time.perf_counter() - slot_wait_started) * 1000,
-                  workload=kind)
-        if kind == "foreground":
-            _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
-        _LOCAL_MODEL_CURRENT.clear()
-        _LOCAL_MODEL_CURRENT.update({
-            "task": current_task,
-            "workload": kind,
-            "url": target_url,
-            "model": model,
-            "started": time.time(),
-        })
+    finally:
+        if foreground_registered:
+            _release_foreground_wait()
+        if acquired:
+            _release_local_model_slot(current_task, "task")
+
+
+@contextmanager
+def _local_model_slot_sync(target_url: str, model: str):
+    """Use the shared local-model gate for synchronous callers."""
+    if not _local_model_gate_enabled() or not is_local_endpoint(target_url):
+        yield
+        return
+
+    owner = threading.current_thread()
+    deadline = time.monotonic() + _LOCAL_MODEL_ADMISSION_TIMEOUT_SECONDS
+    _register_foreground_wait(model)
+    foreground_registered = True
+    acquired = False
+    try:
+        while True:
+            acquired, foreground_registered = _try_acquire_local_model_slot(
+                owner,
+                "foreground",
+                target_url,
+                model,
+                foreground_registered,
+            )
+            if acquired:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _local_slot_timeout(model, "foreground")
+            time.sleep(min(0.1, remaining))
+        if _is_loopback_endpoint(target_url):
+            _check_local_model_resources(model)
         yield
     finally:
-        if kind == "foreground":
-            _LOCAL_MODEL_WAITING_FOREGROUND = max(0, _LOCAL_MODEL_WAITING_FOREGROUND - 1)
-        if acquired and _LOCAL_MODEL_LOCK.locked():
-            owner = _LOCAL_MODEL_CURRENT.get("task")
-            if owner is current_task:
-                _LOCAL_MODEL_CURRENT.clear()
-            _LOCAL_MODEL_LOCK.release()
+        if foreground_registered:
+            _release_foreground_wait()
+        if acquired:
+            _release_local_model_slot(owner, "thread")
 
 class LLMConfig:
     """Configuration constants for LLM operations."""
@@ -2131,8 +2329,11 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
     try:
-        note_model_activity(target_url, model)
-        r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
+        with _local_model_slot_sync(target_url, model):
+            note_model_activity(target_url, model)
+            r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
+    except _LocalModelAdmissionError:
+        raise
     except Exception as e:
         raise HTTPException(502, f"POST {target_url} failed: {e}")
     if not r.is_success:
@@ -2732,6 +2933,17 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 if chunk.startswith("event: error"):
                     outcome = "error"
                 yield chunk
+    except _LocalModelAdmissionError as error:
+        outcome = "error"
+        logger.warning(
+            "[model-admission] local request rejected model=%s status=%s",
+            model,
+            error.status_code,
+        )
+        yield (
+            "event: error\n"
+            + f'data: {json.dumps({"error": error.detail, "status": error.status_code})}\n\n'
+        )
     except BaseException:
         outcome = "cancelled"
         raise

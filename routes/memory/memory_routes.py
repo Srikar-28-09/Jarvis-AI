@@ -129,7 +129,10 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 raise HTTPException(404, "Session not found")
             _assert_session_owner(session_obj, user)
 
-        new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user)
+        try:
+            new_entry = memory_manager.add_entry(text, memory_data.source, memory_data.category, owner=user)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
         if memory_data.session_id:
             new_entry["session_id"] = memory_data.session_id
         all_mem = _load_for_update(memory_manager)

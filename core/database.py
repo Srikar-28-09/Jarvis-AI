@@ -813,6 +813,40 @@ class EditorDraft(TimestampMixin, Base):
     )
 
 
+class AttentionEvent(TimestampMixin, Base):
+    """Owner-scoped remote attention, escalation, and approval challenge state."""
+    __tablename__ = "attention_events"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    attention_class = Column(String, nullable=False)
+    urgency = Column(String, nullable=False)
+    reason = Column(String, nullable=False)
+    summary = Column(Text, nullable=False, default="")
+    task_id = Column(String, nullable=True, index=True)
+    run_id = Column(String, nullable=True, index=True)
+    approval_id = Column(String, nullable=True, index=True)
+    dedupe_key = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, default="pending")
+    expires_at = Column(DateTime, nullable=True)
+    acknowledged_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    deliveries = Column(Text, nullable=True, default="[]")
+    audit_history = Column(Text, nullable=True, default="[]")
+    challenge_id = Column(String, nullable=True, unique=True)
+    challenge_code_hash = Column(String, nullable=True)
+    challenge_status = Column(String, nullable=True)
+    challenge_attempts = Column(Integer, nullable=False, default=0)
+    challenge_expires_at = Column(DateTime, nullable=True)
+    last_call_sid = Column(String, nullable=True)
+    last_call_attempt_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_attention_events_owner_status", "owner", "status"),
+        Index("ix_attention_events_dedupe", "owner", "dedupe_key", "status"),
+    )
+
+
 class TaskRun(Base):
     """Record of a single execution of a ScheduledTask."""
     __tablename__ = "task_runs"

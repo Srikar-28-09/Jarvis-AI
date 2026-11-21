@@ -54,6 +54,27 @@ DEFAULT_SETTINGS = {
     # Public base URL used to build clickable deep-links in outgoing alerts
     # (e.g., urgency alert email). Example: "https://chat.example.com"
     "app_public_url": "",
+    # Remote attention and escalation. Phone calling is disabled until every
+    # provider and recipient setting is explicitly configured.
+    "attention_phone_escalation_enabled": False,
+    "attention_telephony_provider": "disabled",
+    "attention_decision_required_call": True,
+    "attention_critical_call": True,
+    "attention_critical_quiet_hours_override": False,
+    "attention_quiet_hours_start": "",
+    "attention_quiet_hours_end": "",
+    "attention_event_ttl_minutes": 60,
+    "attention_challenge_ttl_minutes": 10,
+    "attention_max_calls_per_hour": 2,
+    "attention_call_cooldown_minutes": 30,
+    "attention_max_call_attempts": 1,
+    # Proactive intelligence is opt-in and event-driven. It adds bounded
+    # observations; it never auto-executes consequential tools or notifications.
+    "proactive_intelligence_enabled": False,
+    "proactive_max_events_per_hour": 6,
+    # Shared task/recovery context injection is opt-in so scheduled prompt
+    # prefixes remain stable and optional context never delays normal requests.
+    "context_orchestration_enabled": False,
     "tts_enabled": True,
     "tts_provider": "disabled",
     "tts_model": "tts-1",

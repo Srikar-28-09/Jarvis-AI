@@ -241,6 +241,13 @@ def _task_to_dict(t: ScheduledTask, include_last_run_result: bool = False) -> di
 
 
 def _run_to_dict(r: TaskRun) -> dict:
+    checkpoint = {}
+    try:
+        value = json.loads(getattr(r, "steps", None) or "")
+        if isinstance(value, dict) and value.get("version") == 1:
+            checkpoint = value
+    except (TypeError, ValueError):
+        pass
     return {
         "id": r.id,
         "task_id": r.task_id,
@@ -251,6 +258,9 @@ def _run_to_dict(r: TaskRun) -> dict:
         "error": r.error,
         "tokens_used": r.tokens_used,
         "model": r.model,
+        "checkpoint": checkpoint.get("stage"),
+        "attempt_count": checkpoint.get("attempt_count"),
+        "recovery": checkpoint.get("recovery"),
     }
 
 
@@ -870,7 +880,7 @@ def setup_task_routes(task_scheduler) -> APIRouter:
         started = await task_scheduler.run_task_now(task_id, force=force)
         if not started:
             raise HTTPException(409, "Task is already running")
-        return {"ok": True, "message": "Task triggered" + (" in parallel" if force else "")}
+        return {"ok": True, "message": "Task triggered"}
 
     @router.post("/{task_id}/stop")
     async def stop_task_now(request: Request, task_id: str):

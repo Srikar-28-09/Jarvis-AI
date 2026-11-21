@@ -349,7 +349,10 @@ class McpManager:
         flow is awaiting browser authorization and status becomes 'needs_auth'."""
         import asyncio
         self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
-        task = asyncio.create_task(self._connect_http(server_id, name, url))
+        task = asyncio.create_task(
+            self._connect_http(server_id, name, url),
+            name=f"mcp-connect:{server_id}",
+        )
         self._connect_tasks[server_id] = task
         done, _ = await asyncio.wait({task}, timeout=wait)
         if task in done:
@@ -372,6 +375,7 @@ class McpManager:
 
     async def _connect_http(self, server_id: str, name: str, url: str) -> bool:
         """Connect to a Streamable HTTP MCP server (with automatic OAuth)."""
+        stack = None
         try:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
@@ -404,6 +408,7 @@ class McpManager:
 
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
+            stack = None
             self._tools[server_id] = tools
             self._connections[server_id] = {
                 "status": "connected", "name": name, "transport": "http",
@@ -424,6 +429,16 @@ class McpManager:
             logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
             self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
             return False
+        finally:
+            if stack is not None:
+                try:
+                    await stack.aclose()
+                except Exception:
+                    logger.warning(
+                        "Error closing incomplete MCP connection %s",
+                        server_id,
+                        exc_info=True,
+                    )
 
     async def disconnect_server(self, server_id: str):
         """Disconnect from an MCP server."""
@@ -432,6 +447,16 @@ class McpManager:
         task = self._connect_tasks.pop(server_id, None)
         if task is not None and not task.done():
             task.cancel()
+        if task is not None and task is not asyncio.current_task():
+            result = (await asyncio.gather(task, return_exceptions=True))[0]
+            if isinstance(result, BaseException) and not isinstance(
+                result, asyncio.CancelledError
+            ):
+                logger.warning(
+                    "MCP connection task failed while disconnecting %s",
+                    server_id,
+                    exc_info=(type(result), result, result.__traceback__),
+                )
         try:
             from src.mcp_oauth import clear_auth_url
             clear_auth_url(server_id)
@@ -462,9 +487,14 @@ class McpManager:
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
-        ids = list(self._sessions.keys())
+        ids = list(dict.fromkeys((*self._sessions.keys(), *self._connect_tasks.keys())))
         for sid in ids:
-            await self.disconnect_server(sid)
+            try:
+                await self.disconnect_server(sid)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Failed to disconnect MCP server %s", sid)
 
 
     async def connect_all_enabled(self):
@@ -473,11 +503,21 @@ class McpManager:
             servers = db.query(McpServer).filter(McpServer.is_enabled == True).all()
 
             tasks = [
-                asyncio.create_task(self._connect_with_timeout(srv))
+                asyncio.create_task(
+                    self._connect_with_timeout(srv),
+                    name=f"mcp-startup-connect:{srv.id}",
+                )
                 for srv in servers
             ]
 
-            await asyncio.gather(*tasks)
+            try:
+                await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
         finally:
             db.close()
 

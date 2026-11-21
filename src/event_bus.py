@@ -80,6 +80,12 @@ def _resolve_event_owner(owner: Optional[str]) -> Optional[str]:
 async def _handle_event(event_name: str, owner: Optional[str] = None):
     """Process an event: increment counters, fire tasks that hit their threshold."""
     from core.database import SessionLocal, ScheduledTask
+    try:
+        if event_name in {"task_failed", "task_blocked", "task_deadline", "critical_failure"}:
+            from src.proactive import evaluate_proactive_event
+            evaluate_proactive_event(event_name, owner)
+    except Exception:
+        logger.debug("Proactive event evaluation failed", exc_info=True)
 
     resolved_owner = _resolve_event_owner(owner)
     db = SessionLocal()

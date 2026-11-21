@@ -283,12 +283,33 @@ async def _get_builtin_python_tools(server_id: str) -> list[dict]:
 _BG_TASKS: set[asyncio.Task] = set()
 
 
-def _spawn_bg(coro) -> asyncio.Task:
+def _spawn_bg(coro, name: str | None = None) -> asyncio.Task:
     """Schedule a background task and hold a strong reference until it finishes."""
-    task = asyncio.create_task(coro)
+    task = asyncio.create_task(coro, name=name or "builtin-mcp-startup")
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
     return task
+
+
+async def cancel_builtin_server_startup_tasks():
+    """Cancel and await built-in MCP registrations owned by application startup."""
+    tasks = list(_BG_TASKS)
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if not tasks:
+        return
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for task, result in zip(tasks, results):
+        if isinstance(result, BaseException) and not isinstance(
+            result, asyncio.CancelledError
+        ):
+            logger.error(
+                "Built-in MCP startup task %s failed during shutdown",
+                task.get_name(),
+                exc_info=(type(result), result, result.__traceback__),
+            )
+
 
 def _find_browser_executable() -> str:
     """Find a browser binary for the built-in Playwright MCP server.
@@ -350,10 +371,11 @@ async def register_builtin_servers(mcp_manager):
     """Connect all built-in MCP servers to the manager."""
     if MCP_DISABLED:
         logger.info("Built-in MCP servers disabled via ODYSSEUS_DISABLE_MCP")
-        return
+        return []
 
     base_dir = get_app_root()
     python = sys.executable
+    startup_tasks = []
 
     if LAZY_MCP_ENABLED:
         logger.info("Registering built-in MCP servers in lazy on-demand mode")
@@ -395,7 +417,7 @@ async def register_builtin_servers(mcp_manager):
                 tools=_DEFAULT_BROWSER_TOOLS,
             )
             logger.info(f"Registered lazy built-in NPX server: {cfg['name']} ({len(_DEFAULT_BROWSER_TOOLS)} tools)")
-        return
+        return startup_tasks
 
     async def _connect_python_server(server_id: str, script_path: str, name: str):
         try:
@@ -414,7 +436,7 @@ async def register_builtin_servers(mcp_manager):
         except asyncio.CancelledError:
             logger.warning(f"Built-in MCP server {name} cancelled")
             raise
-        except BaseException as e:
+        except Exception as e:
             logger.warning(f"Built-in MCP server {name} error: {type(e).__name__}: {e}")
 
     for server_id, (script, name) in _BUILTIN_SERVERS.items():
@@ -422,7 +444,12 @@ async def register_builtin_servers(mcp_manager):
         if not os.path.exists(script_path):
             logger.warning(f"Built-in MCP server script not found: {script_path}")
             continue
-        _spawn_bg(_connect_python_server(server_id, script_path, name))
+        startup_tasks.append(
+            _spawn_bg(
+                _connect_python_server(server_id, script_path, name),
+                f"builtin-mcp-connect:{server_id}",
+            )
+        )
 
     # Register NPX-based servers in the background (they take longer to start)
     npx_path = _find_npx()
@@ -472,10 +499,13 @@ async def register_builtin_servers(mcp_manager):
                     logger.warning(f"Built-in NPX server failed to connect: {cfg['name']}")
             except asyncio.CancelledError:
                 raise
-            except BaseException as e:
+            except Exception as e:
                 logger.warning(f"Built-in NPX server {cfg['name']} error: {type(e).__name__}: {e}")
 
-    _spawn_bg(_start_npx_servers())
+    startup_tasks.append(
+        _spawn_bg(_start_npx_servers(), "builtin-mcp-npx-startup")
+    )
+    return startup_tasks
 
 
 def _npx_package_from_args(args):

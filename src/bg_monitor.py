@@ -118,6 +118,9 @@ async def _run_followup(rec: dict) -> bool:
     except Exception:
         pass
 
+    if not bg_jobs.claim_followup(rec["id"]):
+        return False
+
     context = sess.get_context_messages()
     context.append(_background_result_message(rec))
 
@@ -150,9 +153,18 @@ async def _loop():
                 try:
                     if await _run_followup(rec):
                         bg_jobs.mark_followed_up(rec["id"])
+                except asyncio.CancelledError:
+                    bg_jobs.mark_followup_uncertain(rec["id"])
+                    raise
                 except Exception as e:
-                    # Idempotent: leave followed_up=False so the next tick retries.
-                    logger.warning("bg-followup failed for %s (will retry): %s", rec.get("id"), e)
+                    # The agent may already have performed a side effect. Do
+                    # not retry automatically when the outcome is uncertain.
+                    bg_jobs.mark_followup_uncertain(rec["id"])
+                    logger.warning(
+                        "bg-followup for %s needs reconciliation after %s",
+                        rec.get("id"),
+                        type(e).__name__,
+                    )
         except Exception as e:
             logger.warning("bg-monitor tick error: %s", e)
         await asyncio.sleep(POLL_INTERVAL_S)

@@ -18,10 +18,40 @@ from src.task_action_policy import (
 
 logger = logging.getLogger(__name__)
 
+_MAX_TASK_RECOVERY_ATTEMPTS = 3
+_TASK_RECOVERY_BACKOFF_SECONDS = 60
+_MAX_TASK_RECOVERY_BACKOFF_SECONDS = 900
+_TASK_EXECUTION_TIMEOUT_SECONDS = 3600
+_MAX_TASK_RESULT_CHARS = 16000
+
 
 def _utcnow() -> datetime:
     """Return naive UTC for task DB fields without using deprecated APIs."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _read_run_checkpoint(run) -> dict:
+    try:
+        value = json.loads(getattr(run, "steps", None) or "")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) and value.get("version") == 1 else {}
+
+
+def _write_run_checkpoint(
+    run,
+    *,
+    stage: str,
+    attempt_count: int,
+    recovery: str = "none",
+) -> None:
+    run.steps = json.dumps({
+        "version": 1,
+        "stage": stage,
+        "attempt_count": max(1, int(attempt_count)),
+        "recovery": recovery,
+        "updated_at": _utcnow().isoformat() + "Z",
+    })
 
 
 # Shell/file tools a scheduled task's agent should be offered by default,
@@ -362,12 +392,18 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        self._shutting_down = False
         self._wake_event = asyncio.Event()
 
     def wake(self):
         """Wake the scheduler loop immediately if waiting on sleep."""
         if hasattr(self, "_wake_event") and self._wake_event:
             self._wake_event.set()
+
+    def _create_task_run(self, task_id: str, coro):
+        task = asyncio.create_task(coro, name=f"scheduled-task:{task_id}")
+        self._task_handles[task_id] = task
+        return task
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -386,10 +422,17 @@ class TaskScheduler:
         except Exception:
             logger.debug("Task progress update failed", exc_info=True)
 
-    def _mark_run_aborted(self, task_id: str, run_id: str | None = None, message: str = "Stopped by user") -> bool:
+    def _mark_run_aborted(
+        self,
+        task_id: str,
+        run_id: str | None = None,
+        message: str = "Stopped by user",
+        *,
+        recovery: str = "none",
+    ) -> bool:
         """Mark an active run as aborted. Used by stop/cancel paths."""
         try:
-            from core.database import SessionLocal, TaskRun
+            from core.database import SessionLocal, ScheduledTask, TaskRun
             db = SessionLocal()
             try:
                 q = db.query(TaskRun)
@@ -407,6 +450,13 @@ class TaskScheduler:
                 run.error = message
                 run.result = run.result or message
                 run.finished_at = _utcnow()
+                checkpoint = _read_run_checkpoint(run)
+                _write_run_checkpoint(
+                    run,
+                    stage="interrupted",
+                    attempt_count=checkpoint.get("attempt_count", 1),
+                    recovery=recovery,
+                )
                 db.commit()
                 return True
             finally:
@@ -459,59 +509,93 @@ class TaskScheduler:
         return take
 
     async def start(self):
-        # On startup, mark any leftover "running" task_runs as errored. Without
-        # this, a server crash leaves rows stuck running indefinitely and the
-        # _executing in-memory set forgets them, so the UI shows phantoms.
+        if getattr(self, "_running", False):
+            logger.debug("Task scheduler already has an active lifecycle owner")
+            return
+        from core.database import SessionLocal, ScheduledTask, TaskRun
+        db = SessionLocal()
         try:
-            from core.database import SessionLocal, TaskRun
-            db = SessionLocal()
-            try:
-                # Zombies from a prior server crash. Tagged "aborted" (not
-                # "error") so the Activity view + error-rate stats don't
-                # falsely blame the task for what was an infrastructure event.
-                stale = db.query(TaskRun).filter(
-                    TaskRun.status.in_(("running", "queued"))
-                ).all()
-                if stale:
-                    now = _utcnow()
-                    for r in stale:
-                        old_status = r.status or "running"
-                        r.status = "aborted"
-                        r.error = "Server restarted while task was " + old_status
-                        r.finished_at = now
-                    db.commit()
-                    logger.info(f"Cleared {len(stale)} stale task_runs from previous run")
-            finally:
-                db.close()
-        except Exception as e:
-            logger.warning(f"Could not clear stale task_runs on startup: {e}")
-
-        # Advance next_run for active tasks whose next_run is already in the
-        # past. Without this, a restart hits _check_due_tasks() with an empty
-        # in-process _executing set, and the same overdue task fires once per
-        # poll until it completes.
-        try:
-            from core.database import SessionLocal as _SL, ScheduledTask as _ST
-            db = _SL()
-            try:
-                now = _utcnow()
-                overdue = db.query(_ST).filter(
-                    _ST.status == "active",
-                    _ST.next_run.isnot(None),
-                    _ST.next_run < now,
-                ).all()
-                if overdue:
-                    for t in overdue:
-                        t.next_run = now + timedelta(seconds=60)
-                    db.commit()
-                    logger.info(
-                        "Pushed next_run forward by 60s for %d overdue active tasks on startup",
-                        len(overdue),
+            now = _utcnow()
+            stale = db.query(TaskRun).filter(
+                TaskRun.status.in_(("running", "queued"))
+            ).all()
+            retry_attempts = {}
+            uncertain_task_ids = set()
+            for run in stale:
+                task = db.query(ScheduledTask).filter(
+                    ScheduledTask.id == run.task_id
+                ).first()
+                checkpoint = _read_run_checkpoint(run)
+                attempt_count = checkpoint.get("attempt_count", 1)
+                if not isinstance(attempt_count, int) or attempt_count < 1:
+                    attempt_count = 1
+                old_status = run.status or "running"
+                run.status = "aborted"
+                run.finished_at = now
+                if old_status == "queued":
+                    run.error = "Server restarted before execution began; safe to retry."
+                    _write_run_checkpoint(
+                        run,
+                        stage="interrupted_before_execution",
+                        attempt_count=attempt_count,
+                        recovery="retry_safe",
                     )
-            finally:
-                db.close()
-        except Exception as e:
-            logger.warning(f"Could not advance overdue next_run on startup: {e}")
+                    retry_attempts[run.task_id] = max(
+                        retry_attempts.get(run.task_id, 0), attempt_count
+                    )
+                else:
+                    run.error = (
+                        "Server restarted during execution; the outcome is uncertain. "
+                        "Review this run before resuming the task."
+                    )
+                    _write_run_checkpoint(
+                        run,
+                        stage="interrupted_during_execution",
+                        attempt_count=attempt_count,
+                        recovery="reconciliation_required",
+                    )
+                    uncertain_task_ids.add(run.task_id)
+                    if task:
+                        task.status = "paused"
+                        task.next_run = None
+
+            for task_id, attempt_count in retry_attempts.items():
+                if task_id in uncertain_task_ids:
+                    continue
+                task = db.query(ScheduledTask).filter(
+                    ScheduledTask.id == task_id
+                ).first()
+                if not task or task.status != "active":
+                    continue
+                if attempt_count >= _MAX_TASK_RECOVERY_ATTEMPTS:
+                    task.status = "paused"
+                    task.next_run = None
+                    continue
+                delay = min(
+                    _TASK_RECOVERY_BACKOFF_SECONDS * (2 ** (attempt_count - 1)),
+                    _MAX_TASK_RECOVERY_BACKOFF_SECONDS,
+                )
+                task.next_run = now + timedelta(seconds=delay)
+
+            # Do not replay an execution whose external effects may already
+            # have happened. Resume only tasks that have no interrupted run.
+            overdue = db.query(ScheduledTask).filter(
+                ScheduledTask.status == "active",
+                ScheduledTask.next_run.isnot(None),
+                ScheduledTask.next_run < now,
+            ).all()
+            for task in overdue:
+                if task.id not in retry_attempts and task.id not in uncertain_task_ids:
+                    task.next_run = now + timedelta(seconds=_TASK_RECOVERY_BACKOFF_SECONDS)
+            if stale or overdue:
+                db.commit()
+                logger.info(
+                    "Recovered %d interrupted scheduled task run(s); paused %d uncertain task(s)",
+                    len(stale),
+                    len(uncertain_task_ids),
+                )
+        finally:
+            db.close()
 
         # Defense-in-depth dedupe sweep: for any owner with >1 rows where
         # is_default_assistant=True, keep the oldest and demote the rest +
@@ -552,6 +636,7 @@ class TaskScheduler:
         except Exception as e:
             logger.warning(f"Could not dedupe default-assistant rows on startup: {e}")
 
+        self._shutting_down = False
         self._running = True
         self._task = asyncio.create_task(self._loop())
         # Internal background scanner that isn't a user-facing "task" — pure
@@ -593,18 +678,49 @@ class TaskScheduler:
 
     async def stop(self):
         self._running = False
+        self._shutting_down = True
+        tasks = []
         if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        for attr in ("_note_pings_task", "_event_pings_task"):
+            tasks.append(("scheduler loop", self._task))
+        for attr, name in (
+            ("_note_pings_task", "note pings"),
+            ("_event_pings_task", "event pings"),
+        ):
             t = getattr(self, attr, None)
             if t:
-                t.cancel()
-                try: await t
-                except asyncio.CancelledError: pass
+                tasks.append((name, t))
+        managed_tasks = {task for _, task in tasks}
+        for task_id, task in list(getattr(self, "_task_handles", {}).items()):
+            if task not in managed_tasks:
+                tasks.append((f"scheduled task {task_id}", task))
+                managed_tasks.add(task)
+        for _, task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            results = await asyncio.gather(
+                *(task for _, task in tasks),
+                return_exceptions=True,
+            )
+            for (name, _), result in zip(tasks, results):
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    logger.error(
+                        "Task scheduler %s failed during shutdown",
+                        name,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+        task_ids = [
+            task_id
+            for task_id, task in getattr(self, "_task_handles", {}).items()
+            if task in managed_tasks
+        ]
+        for task_id in task_ids:
+            self._task_handles.pop(task_id, None)
+        if task_ids:
+            async with self._executing_lock:
+                self._executing.difference_update(task_ids)
         logger.info("Task scheduler stopped")
 
     async def _note_pings_loop(self):
@@ -712,6 +828,8 @@ class TaskScheduler:
         from core.database import SessionLocal, ScheduledTask
         db = SessionLocal()
         try:
+            if not self._running:
+                return
             now = _utcnow()
             foreground_active = False
             try:
@@ -720,6 +838,8 @@ class TaskScheduler:
             except Exception:
                 foreground_active = False
             async with self._executing_lock:
+                if not self._running:
+                    return
                 # Snapshot under the lock so we don't race with mid-iteration adds.
                 executing_snapshot = set(self._executing)
                 # Scheduled tasks and deferred event tasks both use next_run.
@@ -730,7 +850,8 @@ class TaskScheduler:
                 ).all()
                 to_dispatch = []
                 for task in due:
-                    if task.id in self._executing:
+                    handle = self._task_handles.get(task.id)
+                    if task.id in self._executing or (handle and not handle.done()):
                         continue
                     if foreground_active and self._task_needs_model_slot(task.id):
                         task.next_run = now + timedelta(minutes=15)
@@ -740,7 +861,7 @@ class TaskScheduler:
                 if foreground_active and due:
                     db.commit()
             for task_id in to_dispatch:
-                asyncio.create_task(self._execute_task(task_id))
+                self._create_task_run(task_id, self._execute_task(task_id))
         finally:
             db.close()
 
@@ -749,26 +870,69 @@ class TaskScheduler:
         # semaphore so the UI can show that a manually-triggered task is in
         # line behind another. Once we acquire the slot, flip to "running"
         # and hand off to _execute_task_locked.
-        from core.database import SessionLocal, TaskRun
+        from core.database import SessionLocal, ScheduledTask, TaskRun
         current = asyncio.current_task()
         if current:
             self._task_handles[task_id] = current
         run_id = str(uuid.uuid4())
         _q_db = SessionLocal()
+        retry_exhausted = False
         try:
-            run = TaskRun(
-                id=run_id,
-                task_id=task_id,
-                started_at=_utcnow(),
-                status="queued",
-                result="Queued — waiting for a free slot…",
-            )
-            _q_db.add(run)
-            _q_db.commit()
+            prior_runs = _q_db.query(TaskRun).filter(
+                TaskRun.task_id == task_id
+            ).order_by(TaskRun.started_at.desc()).limit(_MAX_TASK_RECOVERY_ATTEMPTS).all()
+            retry_attempts = 0
+            for prior_run in prior_runs:
+                prior_checkpoint = _read_run_checkpoint(prior_run)
+                if (
+                    prior_run.status == "aborted"
+                    and prior_checkpoint.get("recovery") == "retry_safe"
+                ):
+                    retry_attempts += 1
+                else:
+                    break
+            attempt_count = retry_attempts + 1
+            if attempt_count > _MAX_TASK_RECOVERY_ATTEMPTS:
+                exhausted = _q_db.query(ScheduledTask).filter(
+                    ScheduledTask.id == task_id
+                ).first()
+                if exhausted:
+                    exhausted.status = "paused"
+                    exhausted.next_run = None
+                    _q_db.commit()
+                logger.warning(
+                    "Paused task %s after exhausting safe recovery attempts",
+                    task_id,
+                )
+                retry_exhausted = True
+            else:
+                run = TaskRun(
+                    id=run_id,
+                    task_id=task_id,
+                    started_at=_utcnow(),
+                    status="queued",
+                    result="Queued — waiting for a free slot…",
+                )
+                _write_run_checkpoint(
+                    run,
+                    stage="queued",
+                    attempt_count=attempt_count,
+                )
+                _q_db.add(run)
+                _q_db.commit()
         except Exception:
             logger.exception(f"Failed to create queued run row for task {task_id}")
         finally:
             _q_db.close()
+
+        if retry_exhausted:
+            handle = self._task_handles.get(task_id)
+            if handle is current:
+                self._task_handles.pop(task_id, None)
+            if release_executing:
+                async with self._executing_lock:
+                    self._executing.discard(task_id)
+            return
 
         try:
             if bypass_model_slot or not self._task_needs_model_slot(task_id):
@@ -790,8 +954,25 @@ class TaskScheduler:
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
-            self._mark_run_aborted(task_id, run_id)
-            self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
+            retry_safe = getattr(self, "_shutting_down", False)
+            self._mark_run_aborted(
+                task_id,
+                run_id,
+                message=(
+                    "Application shutdown interrupted the queued run; safe to retry."
+                    if retry_safe
+                    else "Stopped by user"
+                ),
+                recovery="retry_safe" if retry_safe else "none",
+            )
+            self._defer_immediately_due_task(
+                task_id,
+                delay=timedelta(
+                    seconds=_TASK_RECOVERY_BACKOFF_SECONDS
+                    if retry_safe
+                    else 15 * 60
+                ),
+            )
             raise
         finally:
             handle = self._task_handles.get(task_id)
@@ -810,13 +991,10 @@ class TaskScheduler:
             db = SessionLocal()
             try:
                 task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-                if (
-                    task
-                    and task.status == "active"
-                    and task.next_run is not None
-                    and task.next_run <= _utcnow()
-                ):
-                    task.next_run = _utcnow() + delay
+                if task and task.status == "active":
+                    retry_at = _utcnow() + delay
+                    if task.next_run is None or task.next_run > retry_at or task.next_run <= _utcnow():
+                        task.next_run = retry_at
                     db.commit()
             finally:
                 db.close()
@@ -885,6 +1063,12 @@ class TaskScheduler:
                 run.status = "running"
                 run.started_at = _utcnow()
                 run.result = "Starting…"
+                checkpoint = _read_run_checkpoint(run)
+                _write_run_checkpoint(
+                    run,
+                    stage="execution_started",
+                    attempt_count=checkpoint.get("attempt_count", 1),
+                )
                 db.commit()
             else:
                 # Defensive: row may have been wiped; recreate so the rest of
@@ -895,6 +1079,11 @@ class TaskScheduler:
                     started_at=_utcnow(),
                     status="running",
                     result="Starting…",
+                )
+                _write_run_checkpoint(
+                    run,
+                    stage="execution_started",
+                    attempt_count=1,
                 )
                 db.add(run)
                 db.commit()
@@ -929,26 +1118,42 @@ class TaskScheduler:
 
                 foreground_monitor = asyncio.create_task(_cancel_if_foreground_active())
             try:
-                if task_type == "action":
-                    result, success = await self._execute_action(task, run_id=run_id)
-                    run.status = "success" if success else "error"
-                    run.result = result
-                    if not success:
-                        run.error = result
-                elif task_type == "research":
-                    result = await self._execute_research_task(task, db)
-                    run.status = "success"
-                    run.result = result
-                else:
-                    # LLM task — use agent loop for tool access
-                    result = await self._execute_llm_task(task, db)
-                    run.status = "success"
-                    run.result = result
-                # Record which model actually ran (resolved inside the executor).
-                if getattr(self, "_last_run_model", None):
-                    run.model = self._last_run_model
-                if run.status == "success":
-                    await self._deliver_task_result(task, result, db, model=getattr(self, "_last_run_model", None))
+                async with asyncio.timeout(_TASK_EXECUTION_TIMEOUT_SECONDS):
+                    if task_type == "action":
+                        result, success = await self._execute_action(task, run_id=run_id)
+                        run.status = "success" if success else "error"
+                        run.result = result
+                        if not success:
+                            run.error = result
+                    elif task_type == "research":
+                        result = await self._execute_research_task(task, db)
+                        run.status = "success"
+                        run.result = result
+                    else:
+                        # LLM task — use agent loop for tool access
+                        result = await self._execute_llm_task(task, db)
+                        run.status = "success"
+                        run.result = result
+                    if isinstance(result, str) and len(result) > _MAX_TASK_RESULT_CHARS:
+                        marker = "\n\n[Task result truncated]"
+                        result = result[:_MAX_TASK_RESULT_CHARS - len(marker)] + marker
+                        run.result = result
+                    # Record which model actually ran (resolved inside the executor).
+                    if getattr(self, "_last_run_model", None):
+                        run.model = self._last_run_model
+                    if run.status == "success":
+                        checkpoint = _read_run_checkpoint(run)
+                        _write_run_checkpoint(
+                            run,
+                            stage="delivery_started",
+                            attempt_count=checkpoint.get("attempt_count", 1),
+                        )
+                        await self._deliver_task_result(
+                            task,
+                            result,
+                            db,
+                            model=getattr(self, "_last_run_model", None),
+                        )
             except TaskDeferred as defer:
                 count = self._task_defer_counts.get(task_id, 0) + 1
                 self._task_defer_counts[task_id] = count
@@ -968,9 +1173,8 @@ class TaskScheduler:
                 return
             except asyncio.CancelledError:
                 msg = (
-                    "Paused because Odysseus became active"
-                    if foreground_cancel.get("hit")
-                    else "Stopped by user"
+                    "Execution was interrupted; the outcome is uncertain. "
+                    "Review this run before resuming the task."
                 )
                 logger.info("Task '%s' %s", task.name, msg)
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
@@ -979,19 +1183,16 @@ class TaskScheduler:
                     run_obj.error = msg
                     run_obj.result = run_obj.result or msg
                     run_obj.finished_at = _utcnow()
-                task.last_run = _utcnow()
-                if foreground_cancel.get("hit"):
-                    task.next_run = _utcnow() + timedelta(minutes=15)
-                elif (task.trigger_type or "schedule") == "schedule":
-                    task.next_run = compute_next_run(
-                        task.schedule, task.scheduled_time,
-                        task.scheduled_day, task.scheduled_date,
-                        after=_utcnow(),
-                        cron_expression=task.cron_expression,
-                        tz_name=_resolve_task_timezone(db, task),
+                    checkpoint = _read_run_checkpoint(run_obj)
+                    _write_run_checkpoint(
+                        run_obj,
+                        stage="interrupted",
+                        attempt_count=checkpoint.get("attempt_count", 1),
+                        recovery="reconciliation_required",
                     )
-                else:
-                    task.next_run = None
+                task.last_run = _utcnow()
+                task.status = "paused"
+                task.next_run = None
                 db.commit()
                 return
             except TaskNoop as noop:
@@ -1004,6 +1205,12 @@ class TaskScheduler:
                 run.status = "skipped"
                 run.result = str(noop)
                 run.finished_at = _utcnow()
+                checkpoint = _read_run_checkpoint(run)
+                _write_run_checkpoint(
+                    run,
+                    stage="completed",
+                    attempt_count=checkpoint.get("attempt_count", 1),
+                )
                 task.last_run = _utcnow()
                 if (task.trigger_type or "schedule") == "schedule":
                     task.next_run = compute_next_run(
@@ -1032,8 +1239,19 @@ class TaskScheduler:
             task.run_count = (task.run_count or 0) + 1
             self._task_defer_counts.pop(task_id, None)
 
-            # Compute next run only for schedule-triggered tasks
-            if (task.trigger_type or "schedule") == "schedule":
+            # A failed run may have completed an external action before
+            # reporting failure. Pause rather than retrying it automatically.
+            if run.status == "error":
+                task.status = "paused"
+                task.next_run = None
+                checkpoint = _read_run_checkpoint(run)
+                _write_run_checkpoint(
+                    run,
+                    stage="execution_failed",
+                    attempt_count=checkpoint.get("attempt_count", 1),
+                    recovery="reconciliation_required",
+                )
+            elif (task.trigger_type or "schedule") == "schedule":
                 task.next_run = compute_next_run(
                     task.schedule, task.scheduled_time,
                     task.scheduled_day, task.scheduled_date,
@@ -1092,12 +1310,42 @@ class TaskScheduler:
                     )
                 elif not self._has_chain_cycle(db, chain_id, owner=task.owner):
                     logger.info(f"Chaining: '{task.name}' → task {chain_id}")
-                    asyncio.create_task(self._run_chained(chain_id))
+                    self._create_task_run(chain_id, self._run_chained(chain_id))
                 else:
                     logger.warning(f"Skipping chain from '{task.name}': cycle detected")
 
         except Exception as exec_exc:
-            logger.exception(f"Task {task_id} execution error")
+            logger.error(
+                "Task %s execution failed with %s; outcome requires review",
+                task_id,
+                type(exec_exc).__name__,
+            )
+            try:
+                from src.attention import create_attention_event
+                _task_owner = None
+                try:
+                    db_owner = db.query(ScheduledTask).filter(
+                        ScheduledTask.id == task_id
+                    ).first()
+                    _task_owner = db_owner.owner if db_owner else None
+                except Exception:
+                    pass
+                create_attention_event(
+                    owner=_task_owner,
+                    attention_class="important",
+                    reason=f"Scheduled task {task_id} failed.",
+                    summary="Jarvis has an important scheduled-task failure that needs review.",
+                    task_id=task_id,
+                    run_id=run_id,
+                    dedupe_key=f"task-error:{task_id}:{run_id}",
+                )
+                try:
+                    from src.event_bus import fire_event
+                    fire_event("task_failed", _task_owner)
+                except Exception:
+                    pass
+            except Exception:
+                logger.debug("Could not persist task failure attention", exc_info=True)
             # Fetch the task's owner so the error notification reaches
             # the same user the success notification would have.
             _owner = None
@@ -1119,28 +1367,34 @@ class TaskScheduler:
             if _should_notify_error:
                 self.add_notification(f"Task {task_id}", "error", task_id, owner=_owner)
             try:
-                # Persist the actual exception message so the UI can show it
-                err_text = f"{type(exec_exc).__name__}: {exec_exc}"
+                err_text = (
+                    "Execution timed out; the outcome is uncertain. "
+                    "Review this run before resuming the task."
+                    if isinstance(exec_exc, TimeoutError)
+                    else (
+                        "Execution failed; the outcome is uncertain. "
+                        "Review this run before resuming the task."
+                    )
+                )
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
-                if run_obj and run_obj.status in ("running", "success"):
-                    run_obj.status = "error"
+                if run_obj and run_obj.status in ("running", "success", "error"):
+                    run_obj.status = "aborted"
                     run_obj.error = err_text[:2000]
                     run_obj.finished_at = _utcnow()
+                    checkpoint = _read_run_checkpoint(run_obj)
+                    _write_run_checkpoint(
+                        run_obj,
+                        stage="execution_failed",
+                        attempt_count=checkpoint.get("attempt_count", 1),
+                        recovery="reconciliation_required",
+                    )
                 # Advance next_run even on failure so a broken task doesn't
                 # busy-loop the scheduler every tick with a stale past date.
                 task_obj = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-                if task_obj and (task_obj.trigger_type or "schedule") == "schedule":
+                if task_obj:
                     task_obj.last_run = _utcnow()
-                    try:
-                        task_obj.next_run = compute_next_run(
-                            task_obj.schedule, task_obj.scheduled_time,
-                            task_obj.scheduled_day, task_obj.scheduled_date,
-                            after=_utcnow(),
-                            cron_expression=task_obj.cron_expression,
-                            tz_name=_resolve_task_timezone(db, task_obj),
-                        )
-                    except Exception:
-                        pass
+                    task_obj.status = "paused"
+                    task_obj.next_run = None
                 try:
                     db.commit()
                 except Exception as commit_err:
@@ -1159,13 +1413,22 @@ class TaskScheduler:
                         _r = _recover_db.query(TaskRun).filter(TaskRun.id == run_id).first()
                         if _r and _r.status in ("running", "queued"):
                             _r.status = "aborted"
-                            _r.error = f"commit_failed: {type(commit_err).__name__}: {commit_err}"[:2000]
+                            _r.error = (
+                                "Could not persist task completion; outcome is uncertain. "
+                                "Review this run before resuming the task."
+                            )
                             _r.finished_at = _utcnow()
+                            checkpoint = _read_run_checkpoint(_r)
+                            _write_run_checkpoint(
+                                _r,
+                                stage="commit_failed",
+                                attempt_count=checkpoint.get("attempt_count", 1),
+                                recovery="reconciliation_required",
+                            )
                         _t = _recover_db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-                        if _t and (_t.trigger_type or "schedule") == "schedule":
-                            # Push next_run forward 5min as a safe stall so the
-                            # scheduler doesn't immediately re-dispatch.
-                            _t.next_run = _utcnow() + _td(minutes=5)
+                        if _t:
+                            _t.status = "paused"
+                            _t.next_run = None
                             _t.last_run = _utcnow()
                         _recover_db.commit()
                     except Exception as recover_err:
@@ -1668,6 +1931,31 @@ class TaskScheduler:
             messages: list = [{"role": "system", "content": system_prompt}]
             if _dt_msg:
                 messages.append(_dt_msg)
+            try:
+                from src.settings import get_setting
+                if not get_setting("context_orchestration_enabled", False):
+                    raise RuntimeError("context orchestration disabled")
+                from src.constants import DATA_DIR
+                from src.memory import MemoryManager
+                from src.context_orchestrator import assemble_context
+                from src.prompt_security import untrusted_context_message
+                orchestrated = assemble_context(
+                    query=task.prompt or "",
+                    mode="task",
+                    owner=task.owner,
+                    memory_manager=MemoryManager(DATA_DIR),
+                    max_tokens=900,
+                    include_recent=False,
+                    include_tasks=True,
+                )
+                if orchestrated["text"]:
+                    messages.append(untrusted_context_message(
+                        "proactive task context",
+                        orchestrated["text"],
+                        provenance_origin="local",
+                    ))
+            except Exception:
+                pass
             messages.append({"role": "user", "content": task.prompt})
             result = await task_llm_call_async(
                 messages,
@@ -1886,6 +2174,31 @@ class TaskScheduler:
         messages: list = [{"role": "system", "content": system_content}]
         if datetime_context_msg:
             messages.append(datetime_context_msg)
+        try:
+            from src.settings import get_setting
+            if not get_setting("context_orchestration_enabled", False):
+                raise RuntimeError("context orchestration disabled")
+            from src.constants import DATA_DIR
+            from src.memory import MemoryManager
+            from src.context_orchestrator import assemble_context
+            from src.prompt_security import untrusted_context_message
+            orchestrated = assemble_context(
+                query=user_content or "",
+                mode="task",
+                owner=task.owner,
+                memory_manager=MemoryManager(DATA_DIR),
+                max_tokens=900,
+                include_recent=False,
+                include_tasks=True,
+            )
+            if orchestrated["text"]:
+                messages.append(untrusted_context_message(
+                    "proactive task context",
+                    orchestrated["text"],
+                    provenance_origin="local",
+                ))
+        except Exception:
+            logger.debug("Task context orchestration unavailable", exc_info=True)
         messages.append({"role": "user", "content": user_content})
 
         # Resolve headers from the endpoint's API key
@@ -2164,8 +2477,15 @@ class TaskScheduler:
         """Run a chained task. Acquires _executing membership the same way
         run_task_now does so an overlapping scheduler tick can't double-dispatch
         the same task while the chain run is in flight."""
+        if getattr(self, "_shutting_down", False):
+            return
         async with self._executing_lock:
-            if task_id in self._executing:
+            handle = self._task_handles.get(task_id)
+            if (
+                getattr(self, "_shutting_down", False)
+                or task_id in self._executing
+                or (handle and not handle.done())
+            ):
                 return  # already in flight (manual trigger, scheduler tick, or another chain)
             self._executing.add(task_id)
         await self._execute_task(task_id)
@@ -2277,14 +2597,19 @@ class TaskScheduler:
 
     async def run_task_now(self, task_id: str, *, force: bool = False):
         """Manually trigger a task execution."""
-        if force:
-            asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
-            return True
         async with self._executing_lock:
-            if task_id in self._executing:
+            handle = self._task_handles.get(task_id)
+            if (
+                getattr(self, "_shutting_down", False)
+                or task_id in self._executing
+                or (handle and not handle.done())
+            ):
                 return False
             self._executing.add(task_id)
-        asyncio.create_task(self._execute_task(task_id))
+        self._create_task_run(
+            task_id,
+            self._execute_task(task_id, bypass_model_slot=force),
+        )
         return True
 
     async def stop_task(self, task_id: str) -> bool:
@@ -2296,7 +2621,8 @@ class TaskScheduler:
             stopped = True
         async with self._executing_lock:
             if task_id in self._executing:
-                self._executing.discard(task_id)
+                if not handle or handle.done():
+                    self._executing.discard(task_id)
                 stopped = True
 
         stopped = self._mark_run_aborted(task_id) or stopped

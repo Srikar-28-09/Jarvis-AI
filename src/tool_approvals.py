@@ -394,6 +394,22 @@ class ToolApprovalStore:
             selected_tools=tuple(payload["selected_tools"]),
             continuation_query=payload["continuation_query"],
         )
+        try:
+            from src.attention import create_attention_event
+            create_attention_event(
+                owner=pending.owner,
+                attention_class="decision_required",
+                reason="Consequential tool action is awaiting explicit approval.",
+                summary=(
+                    "Jarvis has a consequential action waiting for your explicit approval."
+                ),
+                run_id=pending.origin_run_id,
+                approval_id=pending.approval_id,
+                dedupe_key=f"approval:{pending.approval_id}",
+            )
+        except Exception:
+            # Attention persistence must not replace or weaken the approval gate.
+            pass
         with self._lock:
             self._purge_expired_locked(now)
             # The chat UI exposes one pending card per session, so supersede an

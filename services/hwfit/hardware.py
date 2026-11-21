@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import platform
@@ -477,6 +478,118 @@ def _get_available_ram_gb():
     if "MemAvailable" in meminfo:
         return meminfo["MemAvailable"] / (1024**2)
     return _get_ram_gb() * 0.7
+
+
+def _runtime_available_ram_gb():
+    if platform.system() == "Linux":
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as meminfo:
+                for line in meminfo:
+                    if line.startswith("MemAvailable:"):
+                        available_kb = int(line.split()[1])
+                        return available_kb / (1024**2)
+        except (OSError, ValueError, IndexError):
+            return None
+
+    if platform.system() == "Darwin":
+        try:
+            result = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=2
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        page_size_match = re.search(r"page size of (\d+) bytes", result.stdout)
+        if not page_size_match:
+            return None
+        page_size = int(page_size_match.group(1))
+        available_pages = 0
+        for label in ("Pages free", "Pages inactive", "Pages speculative"):
+            match = re.search(rf"^{label}:\s+([\d.]+)", result.stdout, re.MULTILINE)
+            if match:
+                available_pages += int(float(match.group(1)))
+        return available_pages * page_size / (1024**3)
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemoryStatus(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            status = _MemoryStatus()
+            status.dwLength = ctypes.sizeof(status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return status.ullAvailPhys / (1024**3)
+        except (AttributeError, OSError):
+            return None
+    return None
+
+
+def _runtime_available_vram_gb():
+    result = None
+    nvidia_smi = shutil.which("nvidia-smi") or next(
+        (path for path in NVIDIA_PATH_CANDIDATES if os.path.isfile(path)),
+        None,
+    )
+    if nvidia_smi:
+        try:
+            result = subprocess.run(
+                [
+                    nvidia_smi,
+                    "--query-gpu=memory.free,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if result is not None and result.returncode == 0:
+        free_by_gpu = []
+        for line in result.stdout.splitlines():
+            fields = [field.strip() for field in line.split(",")]
+            if len(fields) < 2:
+                continue
+            try:
+                free_by_gpu.append(float(fields[0]) / 1024.0)
+            except ValueError:
+                continue
+        if free_by_gpu:
+            return min(free_by_gpu)
+
+    free_by_gpu = []
+    for total_path in glob.glob("/sys/class/drm/card[0-9]/device/mem_info_vram_total"):
+        used_path = total_path.replace("mem_info_vram_total", "mem_info_vram_used")
+        try:
+            with open(total_path, encoding="utf-8") as total_file:
+                total_bytes = int(total_file.read().strip())
+            with open(used_path, encoding="utf-8") as used_file:
+                used_bytes = int(used_file.read().strip())
+        except (OSError, ValueError):
+            continue
+        free_by_gpu.append(max(0, total_bytes - used_bytes) / (1024**3))
+    return min(free_by_gpu) if free_by_gpu else None
+
+
+def get_runtime_resources():
+    """Return fresh host memory availability without using the hardware cache."""
+    return {
+        "available_ram_gb": _runtime_available_ram_gb(),
+        "available_vram_gb": _runtime_available_vram_gb(),
+    }
 
 
 def _get_cpu_name():

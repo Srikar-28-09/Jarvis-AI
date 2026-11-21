@@ -45,6 +45,9 @@ mcp<2
 pyotp
 qrcode[pil]
 croniter
+# Official Twilio SDK: outbound calls and RequestValidator use provider-maintained
+# signature validation. Real phone escalation remains disabled by default.
+twilio>=9.0,<11.0
 pytest
 pytest-asyncio
 # starlette.testclient prefers httpx2 since Starlette 1.2.0 and warns on every

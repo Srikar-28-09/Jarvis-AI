@@ -1,6 +1,7 @@
 """Background naming and memory calls yield to newly arriving foreground work."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -18,9 +19,16 @@ async def test_background_naming_and_memory_extraction_are_preemptible(
     never_release = asyncio.Event()
 
     monkeypatch.setenv("ODYSSEUS_LOCAL_MODEL_GATE", "true")
-    monkeypatch.setattr(llm_core, "_LOCAL_MODEL_LOCK", asyncio.Lock())
+    monkeypatch.setattr(llm_core, "_LOCAL_MODEL_LOCK", threading.Lock())
     monkeypatch.setattr(llm_core, "_LOCAL_MODEL_CURRENT", {})
     monkeypatch.setattr(llm_core, "_LOCAL_MODEL_WAITING_FOREGROUND", 0)
+
+    from services.hwfit import hardware
+    monkeypatch.setattr(
+        hardware,
+        "get_runtime_resources",
+        lambda: {"available_ram_gb": 8.0, "available_vram_gb": 4.0},
+    )
 
     from src import interactive_gate
     monkeypatch.setattr(interactive_gate, "has_foreground_activity", lambda: False)

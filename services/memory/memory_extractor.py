@@ -409,7 +409,24 @@ def extract_explicit_memory_and_store(
             logger.debug(f"Explicit memory dedup (text): '{fact_text}' already exists")
             continue
 
-        entry = memory_manager.add_entry(fact_text, source="user_explicit", category=category, owner=_owner)
+        try:
+            entry = memory_manager.add_entry(
+                fact_text,
+                source="user_explicit",
+                category=category,
+                owner=_owner,
+                confidence=0.95,
+                inferred=False,
+            )
+        except TypeError:
+            entry = memory_manager.add_entry(
+                fact_text,
+                "user_explicit",
+                category,
+                owner=_owner,
+            )
+        except ValueError:
+            continue
         if category == "identity":
             entry["pinned"] = True
         sid = getattr(session, "id", getattr(session, "session_id", None))
@@ -611,7 +628,25 @@ async def extract_and_store(
                 logger.debug(f"Memory dedup (fuzzy): '{fact_text[:50]}' too similar to existing")
                 continue
 
-            entry = memory_manager.add_entry(fact_text, source="auto", category=category, owner=_owner)
+            try:
+                entry = memory_manager.add_entry(
+                    fact_text,
+                    source="auto",
+                    category=category,
+                    owner=_owner,
+                    confidence=0.55,
+                    inferred=True,
+                )
+            except TypeError:
+                entry = memory_manager.add_entry(
+                    fact_text,
+                    "auto",
+                    category,
+                    owner=_owner,
+                )
+            except ValueError:
+                logger.debug("Skipped sensitive or invalid extracted memory")
+                continue
             # Auto-pin identity facts (name, job, location) — core context
             if category == "identity":
                 entry["pinned"] = True
