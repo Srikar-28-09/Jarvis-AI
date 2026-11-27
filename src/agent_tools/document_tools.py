@@ -359,6 +359,18 @@ class CreateDocumentTool:
         from src.database import SessionLocal, Document, DocumentVersion, Session as DbSession
 
         raw = content or ""
+        export_pdf = False
+        structured_args = None
+        if raw.lstrip().startswith("{"):
+            try:
+                import json as _json
+
+                candidate = _json.loads(raw)
+                if isinstance(candidate, dict) and candidate.get("export_pdf") is True:
+                    structured_args = candidate
+                    export_pdf = True
+            except (TypeError, ValueError):
+                structured_args = None
         session_id = ctx.get("session_id")
         owner = ctx.get("owner")
 
@@ -370,12 +382,12 @@ class CreateDocumentTool:
         }
 
         # Try XML tag extraction first
-        title = None
-        language = None
-        content = None
-        mt = _re.search(r"<title>\s*(.*?)\s*</title>", raw, _re.DOTALL | _re.IGNORECASE)
-        ml = _re.search(r"<language>\s*(.*?)\s*</language>", raw, _re.DOTALL | _re.IGNORECASE)
-        mc = _re.search(r"<content>\s*(.*?)\s*</content>", raw, _re.DOTALL | _re.IGNORECASE)
+        title = structured_args.get("title") if structured_args else None
+        language = structured_args.get("language") if structured_args else None
+        content = structured_args.get("content") if structured_args else None
+        mt = _re.search(r"<title>\s*(.*?)\s*</title>", raw, _re.DOTALL | _re.IGNORECASE) if not structured_args else None
+        ml = _re.search(r"<language>\s*(.*?)\s*</language>", raw, _re.DOTALL | _re.IGNORECASE) if not structured_args else None
+        mc = _re.search(r"<content>\s*(.*?)\s*</content>", raw, _re.DOTALL | _re.IGNORECASE) if not structured_args else None
         if mt or mc:
             title = mt.group(1).strip() if mt else None
             language = ml.group(1).strip().lower() if ml else None
@@ -461,7 +473,7 @@ class CreateDocumentTool:
             except Exception:
                 logger.debug("document_created event dispatch failed", exc_info=True)
 
-            return {
+            result = {
                 "action": "create",
                 "doc_id": doc_id,
                 "title": title,
@@ -469,6 +481,21 @@ class CreateDocumentTool:
                 "content": content,
                 "version": 1,
             }
+            if export_pdf:
+                try:
+                    from src.pdf_runtime import load_pymupdf_for_pdf_viewer
+
+                    load_pymupdf_for_pdf_viewer()
+                    result["pdf_export"] = {
+                        "available": True,
+                        "url": f"/api/document/{doc_id}/export-pdf",
+                    }
+                except RuntimeError as exc:
+                    result["pdf_export"] = {
+                        "available": False,
+                        "error": str(exc),
+                    }
+            return result
         except Exception as e:
             db.rollback()
             return {"error": f"Failed to create document: {e}"}

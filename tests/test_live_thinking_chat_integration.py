@@ -26,7 +26,7 @@ def test_in_thinking_delta_short_circuits_before_cumulative_normalization():
         "// Detect thinking-in-progress:",
         "} else if (json.type === 'research_progress')",
     )
-    guard = "if (!_thinkingAnalysisGate.shouldAnalyze(roundText, {"
+    guard = "if (!_thinkingAnalysisGate.shouldAnalyze(roundText))"
     normalize = "markdownModule.normalizeThinkingMarkup(roundText)"
     assert guard in delta_path
     assert delta_path.index(guard) < delta_path.index(normalize)
@@ -39,28 +39,16 @@ def test_in_thinking_delta_short_circuits_before_cumulative_normalization():
     assert "_replyDisplayProjector.append(_delta, roundReplyText)" in delta_path
 
 
-def test_short_close_grace_expires_without_another_delta():
-    assert "function _scheduleThinkingGrace()" in _CHAT
-    grace = _between(
-        "function _scheduleThinkingGrace()",
-        "function _replyAfterClosedThinking",
-    )
-    assert "setTimeout(() =>" in grace
-    assert "_finishLiveThinkingTransition();" in grace
-    cancel = _between("_cancelLiveThinkingWork = () =>", "function _finalizeLiveThinking")
-    assert "_cancelThinkingGrace();" in cancel
+def test_only_explicit_thought_markup_enters_thinking_stream():
     delta_path = _between(
         "// Detect thinking-in-progress:",
         "} else if (json.type === 'research_progress')",
     )
-    false_close = _between(
-        "// Detect false close:",
-        "if (hasUnclosedThink && !isThinking)",
-    )
-    assert "Do NOT require a prior unclosed delta" in false_close
-    assert "_afterClose &&" in false_close
-    assert "&& isThinking" not in false_close.split("let _falseCloseDeadline", 1)[1].split("if (isThinking)", 1)[0]
-    assert "_thinkingRecheckAt = _falseCloseDeadline || 0;" in delta_path
+    assert "hasUnclosedThinkTag(normalizedRoundText)" in delta_path
+    assert "startsWithReasoningPrefix" not in delta_path
+    assert "Thinking Process:" not in delta_path
+    assert "_scheduleThinkingGrace" not in _CHAT
+    assert "_falseCloseDeadline" not in _CHAT
 
 
 def test_terminal_paths_use_one_authoritative_rich_round_render():

@@ -98,10 +98,10 @@ def test_endpoint_id_returns_callers_own_endpoint():
     assert ep is not None and ep.id == "ep-alice"
 
 
-def test_endpoint_id_allows_legacy_null_owner_shared_row():
+def test_endpoint_id_rejects_legacy_null_owner_row():
     rows = [_ep("ep-shared", None)]
     ep = _resolve(rows, "alice", "ep-shared")
-    assert ep is not None and ep.id == "ep-shared"
+    assert ep is None
 
 
 def test_endpoint_id_skips_disabled_even_when_owned():
@@ -112,10 +112,10 @@ def test_endpoint_id_skips_disabled_even_when_owned():
 # --- bare first-enabled fallback (no endpoint_id, nothing configured) ---------
 
 def test_fallback_never_picks_another_owners_endpoint():
-    # bob's private endpoint is first in the table, alice must never borrow it.
+    # bob's private endpoint is first and ownerless rows are not shared.
     rows = [_ep("ep-bob", "bob"), _ep("ep-shared", None)]
     ep = _resolve(rows, "alice")
-    assert ep is not None and ep.id == "ep-shared"
+    assert ep is None
 
 
 def test_fallback_returns_none_when_only_others_endpoints():
@@ -125,7 +125,8 @@ def test_fallback_returns_none_when_only_others_endpoints():
 
 # --- legacy single-user / unresolved owner: owner_filter no-op ---------------
 
-def test_null_owner_is_legacy_single_user_noop():
+def test_null_owner_is_legacy_single_user_noop(monkeypatch):
+    monkeypatch.setenv("AUTH_ENABLED", "false")
     rows = [_ep("ep-x", "bob"), _ep("ep-y", "alice")]
     ep = _resolve(rows, None, "ep-x")
     assert ep is not None and ep.id == "ep-x"

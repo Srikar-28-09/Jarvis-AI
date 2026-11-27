@@ -9,6 +9,8 @@ import logging
 import re
 import uuid
 import time
+import threading
+from collections import defaultdict, deque
 from typing import Any
 
 logger = logging.getLogger("request_timing")
@@ -20,6 +22,16 @@ _request_id: contextvars.ContextVar[str] = contextvars.ContextVar("odysseus_requ
 _llm_state: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "odysseus_llm_state", default=None
 )
+_metrics_lock = threading.Lock()
+_stage_samples: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=256))
+_METRIC_STAGES = {
+    "context_build", "llm_first_token", "llm_complete", "llm_queue_wait",
+    "llm_generation_complete", "memory_retrieval", "model_slot_wait",
+    "ollama_first_token", "ollama_http_dispatch", "ollama_payload",
+    "ollama_response_headers", "rag_retrieval", "request_complete",
+    "response_headers", "stt", "tool_execution", "tts", "web_search",
+    "llm_first_answer_token",
+}
 
 
 def set_request_context(request_id: str):
@@ -42,12 +54,35 @@ def llm_call_count() -> int:
 
 
 def log_stage(stage: str, elapsed_ms: float, *, outcome: str = "ok", **fields) -> None:
+    duration = max(0.0, elapsed_ms)
+    if stage in _METRIC_STAGES:
+        with _metrics_lock:
+            _stage_samples[stage].append(duration)
     safe_fields = " ".join(f"{key}={str(value)[:80]}" for key, value in fields.items())
     logger.info(
         "[request_timing] request_id=%s stage=%s elapsed_ms=%.1f outcome=%s%s",
-        current_request_id(), stage, max(0.0, elapsed_ms), outcome,
+        current_request_id(), stage, duration, outcome,
         f" {safe_fields}" if safe_fields else "",
     )
+
+
+def get_timing_summary() -> dict[str, Any]:
+    """Return bounded aggregate timings without request IDs or content."""
+    with _metrics_lock:
+        samples = {stage: list(values) for stage, values in _stage_samples.items()}
+    stages = {}
+    for stage, values in sorted(samples.items()):
+        if not values:
+            continue
+        ordered = sorted(values)
+        stages[stage] = {
+            "samples": len(ordered),
+            "average_ms": round(sum(ordered) / len(ordered), 1),
+            "p50_ms": round(ordered[(len(ordered) - 1) // 2], 1),
+            "p95_ms": round(ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))], 1),
+            "max_ms": round(ordered[-1], 1),
+        }
+    return {"window": "most recent 256 measurements per stage", "stages": stages}
 
 
 def llm_started(provider: str, model: str, *, operation: str = "stream") -> tuple[int, float]:

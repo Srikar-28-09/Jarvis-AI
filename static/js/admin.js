@@ -3087,6 +3087,51 @@ async function loadLogs(isAutoPoll = false) {
   }
 }
 
+async function loadPerformance() {
+  const report = el('performance-report');
+  if (!report) return;
+  report.textContent = 'Collecting readiness and performance diagnostics…';
+  const results = await Promise.allSettled([
+    fetch('/api/ready', { credentials: 'same-origin' }),
+    fetch('/api/diagnostics/services', { credentials: 'same-origin' }),
+    fetch('/api/diagnostics/performance', { credentials: 'same-origin' }),
+  ].map(async response => {
+    const result = await response;
+    return { status: result.status, ok: result.ok, body: await result.json() };
+  }));
+  const lines = [];
+  const [readiness, services, performance] = results;
+  if (readiness.status === 'fulfilled') {
+    lines.push(`Backend readiness: ${readiness.value.body.ready ? 'ready' : 'not ready'} · HTTP ${readiness.value.status}`);
+  } else {
+    lines.push('Backend readiness: unavailable');
+  }
+  if (services.status === 'fulfilled' && services.value.ok) {
+    lines.push(`Service health: ${services.value.body.overall || 'unavailable'}`);
+    for (const service of services.value.body.services || []) {
+      lines.push(`  ${service.name}: ${service.status}`);
+    }
+  } else {
+    lines.push(`Service health: unavailable${services.status === 'fulfilled' ? ` · HTTP ${services.value.status}` : ''}`);
+  }
+  if (performance.status === 'fulfilled' && performance.value.ok) {
+    const snapshot = performance.value.body;
+    lines.push(`CPU utilization: ${snapshot.cpu_utilization_pct == null ? 'unavailable' : `${snapshot.cpu_utilization_pct}%`}`);
+    lines.push(`Available RAM: ${formatAvailableResource(snapshot.resources?.available_ram_gb)}`);
+    lines.push(`Available VRAM: ${formatAvailableResource(snapshot.resources?.available_vram_gb)}`);
+    for (const [stage, timing] of Object.entries(snapshot.timings?.stages || {})) {
+      lines.push(`${stage}: ${timing.samples} samples · avg ${timing.average_ms} ms · p95 ${timing.p95_ms} ms`);
+    }
+  } else {
+    lines.push(`Performance metrics: unavailable${performance.status === 'fulfilled' ? ` · HTTP ${performance.value.status}` : ''}`);
+  }
+  report.textContent = lines.join('\n');
+}
+
+function formatAvailableResource(value) {
+  return Number.isFinite(value) ? `${value.toFixed(1)} GB` : 'unavailable';
+}
+
 function startLogsPolling() {
   if (isLogsPolling) return;
   isLogsPolling = true;
@@ -3152,6 +3197,7 @@ function initAll() {
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initPerformanceView,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
@@ -3161,7 +3207,13 @@ function initAll() {
   refreshAll();
 }
 
+function initPerformanceView() {
+  const refresh = el('performance-refresh-btn');
+  if (refresh) refresh.addEventListener('click', loadPerformance);
+}
+
 function refreshAll() {
+  void loadPerformance();
   loadUsers();
   loadEndpoints();
   loadBuiltinTools();

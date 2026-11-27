@@ -3,6 +3,7 @@ Uses mock imports to avoid loading the full app stack."""
 
 import asyncio
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,6 +64,39 @@ class TestSelfSummaryPrompt:
 
 
 class TestTrimForContext:
+    def test_trimming_keeps_recent_exchange_and_follow_up_guidance(self):
+        messages = [
+            {"role": "system", "content": "You are a clear assistant."},
+            {
+                "role": "system",
+                "content": "Follow-up intent: simplify. Use the immediately preceding exchange.",
+                "_protected": True,
+            },
+        ]
+        for index in range(12):
+            messages.extend(
+                [
+                    {"role": "user", "content": f"old-topic-{index} " + ("x" * 700)},
+                    {"role": "assistant", "content": f"old-answer-{index} " + ("y" * 700)},
+                ]
+            )
+        messages.extend(
+            [
+                {"role": "user", "content": "What is software engineering?"},
+                {"role": "assistant", "content": "It is the process of designing and maintaining software."},
+                {"role": "user", "content": "Explain it simply."},
+            ]
+        )
+
+        trimmed = trim_for_context(messages, context_length=2048, reserve_tokens=512)
+        joined = "\n".join(str(message.get("content", "")) for message in trimmed)
+
+        assert "old-topic-0" not in joined
+        assert "What is software engineering?" in joined
+        assert "It is the process of designing and maintaining software." in joined
+        assert "Explain it simply." in joined
+        assert "Follow-up intent: simplify." in joined
+
     def test_system_truncation_preserves_internal_route_metadata(self):
         messages = [
             {
@@ -209,6 +243,108 @@ class TestMaybeCompactFourthMessage:
         ]}
         result = self._run(messages)
         assert len(result) == 3 and result[2] is True
+
+
+def test_compaction_boundary_starts_at_a_user_turn_not_inside_a_tool_exchange():
+    messages = [
+        {"role": "user", "content": "first request"},
+        {"role": "assistant", "content": "first response"},
+        {"role": "user", "content": "search for this"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1", "type": "function"}],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "content": "tool result"},
+        {"role": "assistant", "content": "second response"},
+        {"role": "user", "content": "current request"},
+    ]
+
+    split_point = cc._turn_aligned_split_point(messages)
+
+    assert split_point == 2
+    assert messages[split_point]["role"] == "user"
+    assert messages[split_point - 1]["role"] == "assistant"
+
+
+def test_compaction_skips_histories_without_a_safe_user_turn_boundary():
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        {"role": "assistant", "content": "result summary"},
+        {"role": "tool", "tool_call_id": "call-2", "content": "more result"},
+    ]
+
+    assert cc._turn_aligned_split_point(messages) is None
+
+
+@pytest.mark.asyncio
+async def test_compaction_state_tracks_only_summarized_persisted_messages(monkeypatch):
+    messages = [
+        {"role": "system", "content": "system " * 100},
+        {"role": "user", "content": "first request", "metadata": {"_db_id": "user-1"}},
+        {"role": "assistant", "content": "first response", "metadata": {"_db_id": "assistant-1"}},
+        {"role": "user", "content": "second request", "metadata": {"_db_id": "user-2"}},
+        {"role": "assistant", "content": "second response", "metadata": {"_db_id": "assistant-2"}},
+        {"role": "user", "content": "current request", "metadata": {"_db_id": "user-3"}},
+    ]
+    state = {}
+    monkeypatch.setattr(cc, "get_context_length", lambda *args: 100)
+    monkeypatch.setattr(cc, "resolve_endpoint", lambda *args, **kwargs: (None, None, None))
+
+    async def fake_summary(*args, **kwargs):
+        return "route-specific summary"
+
+    monkeypatch.setattr(cc, "llm_call_async", fake_summary)
+
+    await cc.maybe_compact(
+        object(),
+        "https://candidate.example/v1",
+        "candidate-model",
+        messages,
+        persist=False,
+        compaction_state=state,
+    )
+
+    assert state["summarized_message_ids"] == ["user-1", "assistant-1"]
+    assert state["split_point"] == 2
+
+
+def test_compaction_persistence_removes_summarized_ids_without_positional_offsets(monkeypatch):
+    original_history = [
+        SimpleNamespace(role="system", content="persisted preface", metadata={"_db_id": "preface"}),
+        SimpleNamespace(role="user", content="old request", metadata={"_db_id": "old-user"}),
+        SimpleNamespace(role="assistant", content="old answer", metadata={"_db_id": "old-assistant"}),
+        SimpleNamespace(role="user", content="recent request", metadata={"_db_id": "recent-user"}),
+        SimpleNamespace(role="assistant", content="recent answer", metadata={"_db_id": "recent-assistant"}),
+    ]
+    session = SimpleNamespace(id="session-1", history=list(original_history))
+    monkeypatch.setattr(
+        cc,
+        "ChatMessage",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        sys.modules["core.models"],
+        "get_session_manager_instance",
+        lambda: None,
+        raising=False,
+    )
+
+    cc._update_session_history(
+        session,
+        summary="summary of old exchange",
+        summarized_message_ids=["old-user", "old-assistant"],
+    )
+
+    assert [message.content for message in session.history] == [
+        "persisted preface",
+        "[Conversation summary]\nsummary of old exchange",
+        "recent request",
+        "recent answer",
+    ]
+    assert session.history[0].metadata["_db_id"] == "preface"
+    assert session.history[2].metadata["_db_id"] == "recent-user"
 
 
 @pytest.mark.asyncio

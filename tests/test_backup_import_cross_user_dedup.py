@@ -61,3 +61,11 @@ def test_users_own_duplicate_is_still_skipped(monkeypatch):
     alice_milk = [e for e in saved["entries"]
                   if e.get("owner") == "alice" and e.get("text", "").lower() == "buy milk"]
     assert len(alice_milk) == 1  # the real duplicate is still deduped
+
+
+def test_import_cannot_override_memory_owner(monkeypatch):
+    endpoint, saved = _setup(monkeypatch, [], user="alice")
+    body = {"memories": [{"text": "Alice memory", "owner": "bob"}]}
+    asyncio.run(endpoint(_Req(body)))
+    imported = saved["entries"]
+    assert imported[0]["owner"] == "alice"

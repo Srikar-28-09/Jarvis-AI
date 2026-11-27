@@ -307,7 +307,7 @@ def _load_mcp_disabled_map() -> Dict[str, set]:
 # System prompt that tells the LLM about available tools.
 # Always injected — the LLM decides whether to use them.
 _AGENT_PREAMBLE = """\
-You are Jarvis, the user's personal assistant. Address the user as Sir naturally when it fits; do not force it into every response. Keep routine replies short and direct, and give full detail when requested. Never expose private reasoning or planning notes. You can run shell commands, execute Python, search the web, \
+You are Jarvis, the user's personal assistant. Use a natural, respectful tone and avoid honorifics unless the user asks for them. Keep routine replies short and direct, and give full detail when requested. Never expose private reasoning or planning notes. You can run shell commands, execute Python, search the web, \
 read/write files, create and edit documents, generate images, manage memories, and more. \
 To use a tool, write a fenced code block with the tool name as the language tag. \
 The block executes automatically and you see the output."""
@@ -426,13 +426,14 @@ _API_AGENT_RULES = """\
   - Listing sessions: "1. [Big Chat](#session-abc123) — 2h ago, 2. [Code Review](#session-def456) — 5h ago\""""
 
 _AGENT_PREAMBLE = """\
-You are Jarvis, the user's personal assistant. Address the user as Sir naturally when it fits; do not force it into every response. Never expose private reasoning, planning notes, or tool-selection narration. Only the tools listed below are available for this turn.
+You are Jarvis, the user's personal assistant. Use a natural, respectful tone and avoid honorifics unless the user asks for them. Never expose private reasoning, planning notes, or tool-selection narration. Only the tools listed below are available for this turn.
 To use a tool, write a fenced code block with the tool name as the language tag. The block executes automatically and you see the output."""
 
 _AGENT_RULES = """\
 ## Base rules
-- Address the user as Sir naturally when it fits; never expose internal reasoning, planning notes, or tool-selection narration.
+- Never expose internal reasoning, planning notes, or tool-selection narration.
 - Default to a short, direct, natural answer; simple questions should usually take one sentence. Skip preambles and repeated facts. Expand when asked or when the task needs detail.
+- Explain concepts in plain language and use a relevant example when it helps. Use the immediately preceding relevant exchange to resolve follow-ups, preserve its meaning, and ask briefly instead of guessing when a reference is unclear.
 - Only use tools when needed. For casual messages like "test", "yo", "thanks", answer normally.
 - If a needed tool/domain is missing from this turn, say what is missing briefly instead of pretending.
 - If the user explicitly says "this workspace" or "current workspace" but no active workspace is set, do not inspect or edit random home-folder files. Tell them to set one with `/workspace pick` or `/workspace set /absolute/path`.
@@ -3782,8 +3783,6 @@ async def stream_agent_loop(
                 "round_endpoint_labels": [direct_actual_endpoint_label],
                 **_usage_bucket_summary([direct_usage]),
             }
-            if direct_reasoning.strip():
-                terminal_metadata["thinking"] = direct_reasoning.strip()
             if isinstance(direct_actual_endpoint_cost_tracked, bool):
                 terminal_metadata["endpoint_cost_tracked"] = (
                     direct_actual_endpoint_cost_tracked
@@ -5143,8 +5142,6 @@ async def stream_agent_loop(
                         "round_endpoint_labels": [*round_endpoint_labels, _round_actual_endpoint_label],
                         **_usage_bucket_summary(usage_buckets),
                     }
-                    if round_reasoning.strip():
-                        terminal_metadata["thinking"] = round_reasoning.strip()
                     if isinstance(actual_endpoint_cost_tracked, bool):
                         terminal_metadata["endpoint_cost_tracked"] = (
                             actual_endpoint_cost_tracked

@@ -2458,6 +2458,11 @@ def setup_model_routes(model_discovery):
         db = SessionLocal()
         try:
             ep = None
+            using_global_default = (
+                bool(settings.get("share_defaults_with_users", False))
+                and bool(ep_id)
+                and ep_id == settings.get("default_endpoint_id", "")
+            )
             if ep_id:
                 ep_q = db.query(ModelEndpoint).filter(
                     ModelEndpoint.id == ep_id, ModelEndpoint.is_enabled == True
@@ -2466,7 +2471,7 @@ def setup_model_routes(model_discovery):
                 # default that points at an endpoint owned by a different user
                 # mustn't silently resolve. Admins are exempt (they manage the
                 # global pool).
-                if _user and not _is_admin:
+                if _user and not _is_admin and not using_global_default:
                     ep_q = owner_filter(ep_q, ModelEndpoint, _user)
                 ep = ep_q.first()
             # Last resort: first enabled endpoint owned by THIS user. Do not

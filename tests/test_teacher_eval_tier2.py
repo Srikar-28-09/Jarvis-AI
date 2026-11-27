@@ -285,7 +285,11 @@ async def test_run_teacher_inline_triggers_tier2_escalation(monkeypatch):
     persisted_approval = final_metrics["data"]["tool_events"][-1]
     assert persisted_approval["ask_user"] == approval
     assert persisted_approval["round"] == 2
-    pending = tool_approval_store.peek(approval["approval_id"])
+    pending = tool_approval_store.peek(
+        approval["approval_id"],
+        owner="alice",
+        session_id=pending_session_id if "pending_session_id" in locals() else None,
+    )
     assert pending is not None
     assert pending.tool_name == "manage_skills"
     assert json.loads(pending.content)["name"] == "test-skill"

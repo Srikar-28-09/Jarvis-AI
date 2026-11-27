@@ -36,6 +36,15 @@ def _message_timestamp_iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _message_order_key(message):
+    timestamp = getattr(message, "timestamp", None)
+    if timestamp is None:
+        return float("-inf"), str(getattr(message, "id", ""))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.timestamp(), str(getattr(message, "id", ""))
+
+
 def _parse_msg_content(raw):
     """Parse message content from DB — deserialises JSON arrays back to lists
     (multimodal content with image/audio attachments)."""
@@ -158,9 +167,12 @@ class SessionManager:
         """Convert a database session to a Session object."""
         history = []
 
-        # Try relationship first, then direct query
-        if db_session.messages:
-            for db_msg in db_session.messages:
+        # Try relationship first, then direct query. SQLAlchemy relationship
+        # iteration has no ordering guarantee, but model context must be a
+        # chronological transcript after hydration.
+        db_messages = list(db_session.messages or [])
+        if db_messages:
+            for db_msg in sorted(db_messages, key=_message_order_key):
                 meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}
                 if meta is None: meta = {}
                 meta['_db_id'] = db_msg.id
@@ -173,7 +185,7 @@ class SessionManager:
         else:
             db_messages = db.query(DbChatMessage).filter(
                 DbChatMessage.session_id == db_session.id
-            ).order_by(DbChatMessage.timestamp).all()
+            ).order_by(DbChatMessage.timestamp, DbChatMessage.id).all()
 
             for db_msg in db_messages:
                 meta = json.loads(db_msg.meta_data) if db_msg.meta_data else {}

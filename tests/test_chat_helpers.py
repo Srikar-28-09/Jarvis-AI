@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from core.models import ChatMessage, Session
 import routes.chat_helpers as chat_helpers
 from routes.chat_helpers import (
     _enforce_chat_privileges,
@@ -19,8 +20,11 @@ from routes.chat_helpers import (
     needs_auto_name,
     PreprocessedMessage,
     PresetInfo,
+    public_response_delta,
+    require_user_facing_answer,
     save_assistant_response,
 )
+from src.chat_processor import ChatProcessor
 
 
 class _AuthManager:
@@ -301,14 +305,14 @@ def test_needs_auto_name(name, expected):
     assert needs_auto_name(name) == expected, f"needs_auto_name({name!r}) should be {expected}"
 
 
-def test_clean_thinking_for_save_extracts_gemma4_thought_channel():
+def test_clean_thinking_for_save_removes_gemma4_thought_channel():
     content, metadata = clean_thinking_for_save(
         "<|channel>thought\ninternal reasoning<channel|>Final answer.",
         {"model": "google/gemma-4-31B-it"},
     )
 
     assert content == "Final answer."
-    assert metadata["thinking"] == "internal reasoning"
+    assert "thinking" not in metadata
     assert metadata["model"] == "google/gemma-4-31B-it"
 
 
@@ -322,24 +326,106 @@ def test_clean_thinking_for_save_strips_empty_gemma4_thought_channel():
     assert "thinking" not in metadata
 
 
-def test_clean_thinking_for_save_unwraps_gemma4_response_channel():
+def test_clean_thinking_for_save_removes_thought_and_unwraps_response_channel():
     content, metadata = clean_thinking_for_save(
         "<|channel>thought\ninternal reasoning<channel|><|channel>response\nFinal answer.<channel|>",
         {"model": "google/gemma-4-31B-it"},
     )
 
     assert content == "Final answer."
-    assert metadata["thinking"] == "internal reasoning"
+    assert "thinking" not in metadata
 
 
-def test_clean_thinking_for_save_extracts_thought_tag():
+def test_clean_thinking_for_save_removes_thought_tag():
     content, metadata = clean_thinking_for_save(
         "<thought>internal reasoning</thought>Final answer.",
         {},
     )
 
     assert content == "Final answer."
-    assert metadata["thinking"] == "internal reasoning"
+    assert "thinking" not in metadata
+
+
+def test_public_stream_boundary_uses_only_structured_reasoning_metadata():
+    assert public_response_delta({"delta": "Private text", "thinking": True}) == ""
+    natural_answer = "The user asks a useful question; I can help with that."
+    assert public_response_delta({"delta": natural_answer}) == natural_answer
+
+
+@pytest.mark.parametrize("response", [None, "", "   "])
+def test_empty_user_facing_answer_is_an_explicit_upstream_error(response):
+    with pytest.raises(HTTPException) as error:
+        require_user_facing_answer(response)
+
+    assert error.value.status_code == 502
+    assert error.value.detail == "The model returned no user-facing answer. Please try again."
+
+
+def test_nonempty_user_facing_answer_is_preserved():
+    assert require_user_facing_answer("  Answer.  ") == "  Answer.  "
+
+
+def test_assistant_metadata_and_saved_content_do_not_expose_legacy_reasoning(monkeypatch):
+    message = ChatMessage(
+        "assistant",
+        "<think>private content</think>Answer",
+        metadata={"thinking": "private text", "thinking_time": "0.5", "model": "model-a"},
+    )
+    serialized = message.to_dict()
+    assert serialized["content"] == "Answer"
+    assert serialized["metadata"] == {"model": "model-a"}
+    assert message.metadata["thinking"] == "private text"
+
+    monkeypatch.setattr("core.database.update_session_last_accessed", lambda _session_id: None)
+    sess = _FakeSession("model-a")
+    save_assistant_response(
+        sess,
+        session_manager=SimpleNamespace(save_sessions=lambda: None),
+        session_id="s1",
+        full_response="<think>private text</think>Answer",
+        last_metrics={"thinking": "private text"},
+    )
+    assert sess.history[-1].content == "Answer"
+    assert "thinking" not in sess.history[-1].metadata
+
+
+def test_conversation_policy_clarifies_only_when_important_details_are_missing():
+    processor = ChatProcessor(None, None)
+    preface, _, _ = processor.build_context_preface(
+        "Prepare me an assignment on photosynthesis.",
+        SimpleNamespace(endpoint_url="", model="", headers={}),
+        use_web=False,
+        use_rag=False,
+        use_memory=False,
+        use_skills=False,
+    )
+    policy = next(message["content"] for message in preface if "## Conversation style" in message["content"])
+
+    assert "one or two concise, task-specific questions" in policy
+    assert "never ask again for details already provided" in policy
+    assert "general-school level" in policy and "standard structure/length" in policy
+    assert "create the draft instead of delaying" in policy
+    assert "complete the task instead of continuing to clarify" in policy
+    assert "preserve all existing permission and approval checks" in policy
+
+
+def test_follow_up_context_retains_clarification_and_supplied_requirements():
+    session = Session(
+        id="s1",
+        name="assignment",
+        endpoint_url="",
+        model="model-a",
+        history=[
+            ChatMessage("user", "Prepare me an assignment on photosynthesis."),
+            ChatMessage("assistant", "Is this for school or college, and what length?"),
+            ChatMessage("user", "College, about 1200 words, with an introduction and conclusion."),
+        ],
+    )
+
+    context = session.get_context_messages()
+
+    assert [message["role"] for message in context] == ["user", "assistant", "user"]
+    assert context[-1]["content"] == "College, about 1200 words, with an introduction and conclusion."
 
 
 def test_save_assistant_response_incognito_does_not_mutate_session_history():
@@ -473,6 +559,8 @@ async def _build_context_owner_probe(
     capture_use_web=False,
     message="hello",
     incognito=True,
+    prior_messages=None,
+    use_enhanced_message=False,
 ):
     captured = {
         "prefs_owner": None,
@@ -537,7 +625,7 @@ async def _build_context_owner_probe(
         model="test-model",
         headers={},
         history=[],
-        messages=[],
+        messages=list(prior_messages or []),
     )
     sess.get_context_messages = lambda: list(sess.messages)
 
@@ -551,6 +639,7 @@ async def _build_context_owner_probe(
         session_id="session-1",
         use_web=use_web,
         incognito=incognito,
+        use_enhanced_message=use_enhanced_message,
     )
 
     return ctx, captured
@@ -606,3 +695,86 @@ async def test_build_chat_context_normalizes_string_web_toggle(monkeypatch, form
     )
 
     assert captured["preface_use_web"] is expected
+
+
+@pytest.mark.asyncio
+async def test_build_chat_context_anchors_follow_up_to_the_previous_exchange(monkeypatch):
+    prior_messages = [
+        {"role": "user", "content": "What is software engineering?"},
+        {
+            "role": "assistant",
+            "content": "Software engineering is the process of designing, building, and maintaining software.",
+        },
+    ]
+    ctx, _ = await _build_context_owner_probe(
+        monkeypatch,
+        {"api_token": False, "current_user": "alice"},
+        message="Explain it simply.",
+        incognito=False,
+        prior_messages=prior_messages,
+    )
+
+    follow_up_policies = [
+        message["content"]
+        for message in ctx.messages
+        if message.get("role") == "system"
+        and "immediately preceding exchange" in message.get("content", "")
+    ]
+    assert follow_up_policies, ctx.messages
+    follow_up_policy = follow_up_policies[0]
+    assert "simplify" in follow_up_policy
+    assert [
+        message["content"]
+        for message in ctx.messages
+        if message.get("role") in {"user", "assistant"}
+        and not str(message.get("content", "")).startswith("[Context -")
+    ][-3:] == [
+        "What is software engineering?",
+        "Software engineering is the process of designing, building, and maintaining software.",
+        "Explain it simply.",
+    ]
+
+    stream_ctx, _ = await _build_context_owner_probe(
+        monkeypatch,
+        {"api_token": False, "current_user": "alice"},
+        message="Explain it simply.",
+        incognito=False,
+        prior_messages=prior_messages,
+        use_enhanced_message=True,
+    )
+    assert any(
+        "Follow-up intent: simplify." in message.get("content", "")
+        for message in stream_ctx.messages
+        if message.get("role") == "system"
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_chat_context_clarifies_missing_follow_up_and_does_not_inherit_unrelated_topics(monkeypatch):
+    follow_up, _ = await _build_context_owner_probe(
+        monkeypatch,
+        {"api_token": False, "current_user": "alice"},
+        message="Explain it simply.",
+        incognito=False,
+    )
+    assert any(
+        "ask one concise clarifying question instead of guessing" in message.get("content", "")
+        for message in follow_up.messages
+        if message.get("role") == "system"
+    )
+
+    unrelated, _ = await _build_context_owner_probe(
+        monkeypatch,
+        {"api_token": False, "current_user": "alice"},
+        message="What is photosynthesis?",
+        incognito=False,
+        prior_messages=[
+            {"role": "user", "content": "What is software engineering?"},
+            {"role": "assistant", "content": "A process for building software."},
+        ],
+    )
+    assert not any(
+        "Follow-up intent:" in message.get("content", "")
+        for message in unrelated.messages
+        if message.get("role") == "system"
+    )

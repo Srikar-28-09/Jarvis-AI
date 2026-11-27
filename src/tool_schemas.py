@@ -441,13 +441,14 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_document",
-            "description": "Create a new document in the editor panel. Use this when the user asks to write, create, build, make, or generate code, scripts, programs, games, apps, or any long-form or structured content that is more than a short paragraph, AND there is no already-open document/email draft that the request refers to. If an email compose draft is open, edit that draft instead of creating another document. NEVER put large generated content directly in chat — use this tool instead.",
+            "description": "Create a new document in the editor panel. Use this when the user asks to write, create, build, make, or generate code, scripts, programs, games, apps, or any long-form or structured content that is more than a short paragraph, AND there is no already-open document/email draft that the request refers to. If an email compose draft is open, edit that draft instead of creating another document. NEVER put large generated content directly in chat — use this tool instead. When the user requests a PDF, set export_pdf=true and only report a PDF download link if the result confirms PDF export is available.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Document title"},
                     "language": {"type": "string", "description": "Programming language or format (e.g. python, javascript, markdown, text)"},
-                    "content": {"type": "string", "description": "The document content"}
+                    "content": {"type": "string", "description": "The document content"},
+                    "export_pdf": {"type": "boolean", "description": "Set true only when the user requests an actual PDF download."}
                 },
                 "required": ["title", "content"]
             }
@@ -1681,11 +1682,19 @@ def function_call_to_tool_block(name: str, arguments: str):
     elif tool_type == "todowrite":
         content = json.dumps(args)
     elif tool_type == "create_document":
-        parts = [args.get("title", "Untitled")]
-        if args.get("language"):
-            parts.append(args["language"])
-        parts.append(args.get("content", ""))
-        content = "\n".join(parts)
+        if args.get("export_pdf") is True:
+            content = json.dumps({
+                "title": args.get("title", "Untitled"),
+                "language": args.get("language", "markdown"),
+                "content": args.get("content", ""),
+                "export_pdf": True,
+            })
+        else:
+            parts = [args.get("title", "Untitled")]
+            if args.get("language"):
+                parts.append(args["language"])
+            parts.append(args.get("content", ""))
+            content = "\n".join(parts)
     elif tool_type == "edit_document":
         blocks = []
         edits = args.get("edits", [])

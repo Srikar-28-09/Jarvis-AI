@@ -17,6 +17,7 @@ close / navigation / refresh). It does NOT survive a server restart.
 import asyncio
 import json
 import logging
+import os
 import uuid
 from typing import AsyncGenerator, Dict, Optional
 
@@ -24,9 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "request_id")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task", "run_id", "request_id", "owner")
 
-    def __init__(self) -> None:
+    def __init__(self, owner: Optional[str] = None) -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
@@ -36,6 +37,7 @@ class _Run:
         # The browser uses it to make local cost accounting replay-idempotent.
         self.run_id: str = uuid.uuid4().hex
         self.request_id: Optional[str] = None
+        self.owner = str(owner or "").strip() or None
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -46,6 +48,19 @@ _REQUEST_RUNS: Dict[str, tuple[str, _Run]] = {}
 # replay the result. After this, the run is evicted to bound memory — without
 # it, every session that ever streamed kept its entire event log forever.
 _EVICT_GRACE_S = 180
+
+
+class PerUserLimitError(ValueError):
+    pass
+
+
+def _max_concurrent_runs_per_owner() -> int:
+    raw = os.getenv("ODYSSEUS_MAX_CONCURRENT_AGENT_RUNS_PER_USER", "4").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 4
+    return max(1, value)
 
 
 def _publish(run: _Run, ev: str) -> None:
@@ -94,25 +109,53 @@ def _schedule_evict(session_id: str, expected_run: Optional[_Run] = None) -> Non
     run.evict_task = asyncio.create_task(_evict(run))
 
 
-def is_active(session_id: str) -> bool:
+def is_active(session_id: str, owner: Optional[str] = None) -> bool:
+    if owner is None:
+        return False
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return False
     r = _RUNS.get(session_id)
+    if r is None or r.owner != normalized_owner:
+        return False
     return bool(r and r.status == "running")
 
 
-def get_status(session_id: str) -> Optional[str]:
+def get_status(session_id: str, owner: Optional[str] = None) -> Optional[str]:
+    if owner is None:
+        return None
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
     r = _RUNS.get(session_id)
-    return r.status if r else None
+    if r is None or r.owner != normalized_owner:
+        return None
+    return r.status
 
 
-def get_run_id(session_id: str) -> Optional[str]:
+def get_run_id(session_id: str, owner: Optional[str] = None) -> Optional[str]:
     """Return the opaque identity of the current detached run, if present."""
+    if owner is None:
+        return None
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
     r = _RUNS.get(session_id)
-    return r.run_id if r else None
+    if r is None or r.owner != normalized_owner:
+        return None
+    return r.run_id
 
 
-def get_active_run(session_id: str) -> Optional[_Run]:
+def get_active_run(session_id: str, owner: Optional[str] = None) -> Optional[_Run]:
     """Return the exact active run currently registered for a session."""
+    if owner is None:
+        return None
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return None
     r = _RUNS.get(session_id)
+    if r is None or r.owner != normalized_owner:
+        return None
     return r if r and r.status == "running" else None
 
 
@@ -176,15 +219,43 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id, run)
 
 
-def get_request_run(request_id: str):
+def get_request_run(request_id: str, owner: Optional[str] = None):
     """Return the existing session/run for a client request ID, if retained."""
-    return _REQUEST_RUNS.get(str(request_id or ""))
+    if owner is None:
+        return None
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    existing = _REQUEST_RUNS.get(str(request_id or ""))
+    if not existing:
+        return None
+    existing_session, existing_run = existing
+    if existing_run.owner != normalized_owner:
+        return None
+    return existing
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None], request_id: Optional[str] = None) -> _Run:
+def start(
+    session_id: str,
+    agen: AsyncGenerator[str, None],
+    request_id: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first.
     Repeated POSTs carrying the same client request ID attach to the first run."""
+    from src.owner_identity import effective_storage_owner
+    resolved_owner = effective_storage_owner(owner)
+    if not resolved_owner:
+        raise ValueError("Detached agent run requires a canonical owner")
+    active_for_owner = sum(
+        1
+        for other_id, other in _RUNS.items()
+        if other_id != session_id
+        and other.owner == resolved_owner
+        and other.status == "running"
+    )
+    if active_for_owner >= _max_concurrent_runs_per_owner():
+        raise PerUserLimitError("Per-user concurrent agent-run limit reached")
     request_id = str(request_id or "").strip()[:128] or None
     if request_id:
         existing = _REQUEST_RUNS.get(request_id)
@@ -192,6 +263,8 @@ def start(session_id: str, agen: AsyncGenerator[str, None], request_id: Optional
             existing_session, existing_run = existing
             if existing_session != session_id:
                 raise ValueError("Request ID is already bound to another session")
+            if existing_run.owner != resolved_owner:
+                raise ValueError("Request ID is already bound to another owner")
             try:
                 asyncio.create_task(agen.aclose())
             except Exception:
@@ -213,7 +286,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None], request_id: Optional
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
+    run = _Run(owner=resolved_owner)
     run.request_id = request_id
     _RUNS[session_id] = run
     if request_id:
@@ -227,6 +300,7 @@ def start(session_id: str, agen: AsyncGenerator[str, None], request_id: Optional
 async def subscribe(
     session_id: str,
     expected_run: Optional[_Run] = None,
+    owner: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Replay the run's buffer from the start, then stream live until it ends.
     Safe to call repeatedly (reconnect) and from multiple clients at once.
@@ -238,6 +312,12 @@ async def subscribe(
     """
     run = expected_run or _RUNS.get(session_id)
     if run is None:
+        return
+    if owner is None:
+        return
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner or run.owner != normalized_owner:
         return
     q: asyncio.Queue = asyncio.Queue()
     run.subscribers.add(q)            # register BEFORE replaying so nothing is missed
@@ -282,17 +362,52 @@ async def subscribe(
             _schedule_evict(session_id, run)
 
 
-def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
+def stop(
+    session_id: str,
+    expected_run_id: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> bool:
     """Cancel the matching in-flight run (which saves its partial output).
 
     A stale browser may issue Stop after another tab has replaced the session's
     run. Once the caller knows its opaque run identity, fail closed rather than
     cancelling that newer run.
     """
+    if owner is None:
+        return False
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return False
     run = _RUNS.get(session_id)
+    if run is None or run.owner != normalized_owner:
+        return False
     if not expected_run_id or run is None or run.run_id != expected_run_id:
         return False
     if run and run.task and not run.task.done():
         run.task.cancel()
         return True
     return False
+
+
+def retire_owner(owner: Optional[str]) -> int:
+    """Cancel and remove every in-memory run owned by a canonical owner."""
+    if owner is None:
+        return 0
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return 0
+    retired = 0
+    for session_id, run in list(_RUNS.items()):
+        if run.owner != normalized_owner:
+            continue
+        retired += 1
+        if run.task and not run.task.done():
+            run.task.cancel()
+        _wake_run_subscribers(run)
+        _RUNS.pop(session_id, None)
+    for request_id, (session_id, run) in list(_REQUEST_RUNS.items()):
+        if run.owner == normalized_owner:
+            _REQUEST_RUNS.pop(request_id, None)
+    return retired

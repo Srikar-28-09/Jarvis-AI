@@ -19,6 +19,8 @@ from src.model_context import estimate_tokens, get_context_length
 from src.auth_helpers import effective_user
 from src.prompt_security import untrusted_context_message
 from src.attachment_refs import attachment_ref
+from src.text_helpers import strip_think
+from src.simple_intents import follow_up_context_instruction
 from routes.prefs_routes import _load_for_user as load_prefs_for_user
 
 from fastapi import HTTPException
@@ -49,6 +51,31 @@ def _is_casual_low_signal(text: str) -> bool:
         return False
     tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
     return len(tail_words) <= 2
+
+
+def _has_completed_exchange(messages: list[dict]) -> bool:
+    last_user_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if messages[index].get("role") == "user"
+        ),
+        None,
+    )
+    if last_user_index is None:
+        return False
+    for message in messages[last_user_index + 1:]:
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return True
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"].strip()
+            for block in content
+        ):
+            return True
+    return False
 
 
 # Strong references to in-flight fire-and-forget tasks scheduled from this
@@ -798,7 +825,26 @@ async def build_chat_context(
     # Build messages. In Nobody/incognito mode, never read saved session
     # history: the session id may be a temporary wrapper or, in buggy clients, a
     # stale normal session id. Only the ephemeral incognito transcript is safe.
-    messages = preface + (_incognito_messages(session_id) if incognito else sess.get_context_messages())
+    conversation_messages = (
+        _incognito_messages(session_id)
+        if incognito
+        else sess.get_context_messages()
+    )
+    if persist_user_message and not continuation_context_message:
+        prior_messages = list(conversation_messages)
+        if prior_messages and prior_messages[-1].get("role") == "user":
+            prior_messages.pop()
+        follow_up_instruction = follow_up_context_instruction(
+            message,
+            has_prior_exchange=_has_completed_exchange(prior_messages),
+        )
+        if follow_up_instruction:
+            preface.append({
+                "role": "system",
+                "content": follow_up_instruction,
+                "_protected": True,
+            })
+    messages = preface + conversation_messages
 
     # Current date/time — injected as a standalone *user*-role context message
     # placed immediately before the latest user turn, NOT folded into the
@@ -882,180 +928,30 @@ def accumulate_token_usage(session_id: str, metrics: dict):
         db.close()
 
 
-def _normalize_thinking(text: str) -> str:
-    """Wrap inline thinking patterns in <think> tags so they persist on reload.
-
-    Handles:
-    - "Thinking Process:" (Qwen3.5)
-    - Gemma-style inline reasoning ("The user said/asked...", "I should/need to...")
-    - Garbled <think> tags (reasoning before the tag, unclosed tags)
-    """
-    import re
-    if not text:
-        return text
-    from src.text_helpers import normalize_thinking_markup
-    text = normalize_thinking_markup(text)
-    reasoning_prefix_re = re.compile(
-        r'^\s*(?:thinking(?:\s+process)?\s*:|the user |i need |i should |i will |they are |the question |i can )',
-        re.IGNORECASE,
-    )
-    thinking_prefix_re = re.compile(r'^thinking(?:\s+process)?\s*:\s*', re.IGNORECASE)
-
-    # Handle garbled <think> tags: reasoning text followed by <think> as separator
-    # e.g. "The user said...I should respond.\n<think>Hey! What's up?"
-    garbled = re.match(
-        r'^([\s\S]+?)\n*<think(?:ing)?>\s*([\s\S]*?)(?:</think(?:ing)?>)?\s*$',
-        text, re.IGNORECASE
-    )
-    if garbled:
-        before = garbled.group(1).strip()
-        after = garbled.group(2).strip()
-        # Only treat as garbled if the part before <think> looks like reasoning
-        reasoning_starts = (
-            'The user ', 'I need ', 'I should ', 'I will ',
-            'They are ', 'The question ', 'I can ',
-            'Thinking Process', 'Thinking:',
-        )
-        stripped_before = before.lstrip()
-        if any(stripped_before.startswith(p) for p in reasoning_starts) or reasoning_prefix_re.match(stripped_before):
-            # Strip "Thinking:" prefix from the thinking content
-            stripped_before = thinking_prefix_re.sub('', stripped_before)
-            return '<think>' + stripped_before + '</think>\n' + after
-
-    if '<think' in text.lower():
-        return text  # already has proper think tags
-
-    # Qwen3.5: "Thinking Process:" or "Thinking:" prefix
-    if thinking_prefix_re.match(text.lstrip()):
-        # Try clean boundary first
-        m = re.match(
-            r'^(Thinking(?:\s+Process)?:[\s\S]*?)(\n\n(?=[A-Z]|Hey|Yo|Hi|Sure|I |What|Here|Let|The |This |OK|Ok|Yes|No |So |Well |Thank|Alright|Of course|Absolutely|Great|Hello|As ))',
-            text, re.IGNORECASE | re.MULTILINE
-        )
-        if m:
-            think = thinking_prefix_re.sub('', m.group(1)).strip()
-            return '<think>' + think + '</think>' + text[m.end()-2:]
-        # Fallback: find last non-indented paragraph as reply
-        parts = text.split('\n\n')
-        for i in range(len(parts) - 1, 0, -1):
-            line = parts[i].strip()
-            if line and not re.match(r'^[\d*\-\s(]', line) and len(line) > 5:
-                think = thinking_prefix_re.sub('', '\n\n'.join(parts[:i])).strip()
-                reply = '\n\n'.join(parts[i:])
-                return '<think>' + think + '</think>\n\n' + reply
-        # Last resort: look for a quoted final response inside the thinking
-        # Qwen often drafts the reply as "Option: ..." or * "reply text"
-        last_quote = re.findall(r'["\u201c]([^"\u201d]{10,})["\u201d]', text)
-        if last_quote:
-            reply = last_quote[-1].strip()
-            think = thinking_prefix_re.sub('', text).strip()
-            return '<think>' + think + '</think>\n\n' + reply
-        # Truly no reply found
-        think = thinking_prefix_re.sub('', text).strip()
-        return '<think>' + think + '</think>'
-
-    # Gemma-style: starts with reasoning ("The user", "I need", "I should", etc.)
-    stripped_text = text.lstrip()
-    first_line = stripped_text.split('\n')[0].strip()
-    reasoning_starts = (
-        'The user ', 'I need ', 'I should ', 'I will ',
-        'They are ', 'The question ', 'I can ',
-    )
-    reply_starts = (
-        'Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK',
-        'Here', 'Absolutely', 'Of course', 'Great', 'Alright',
-        'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be",
-    )
-    if any(first_line.startswith(p) for p in reasoning_starts):
-        # Try line-by-line split first
-        lines = stripped_text.split('\n')
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if i > 0 and any(stripped.startswith(p) for p in reply_starts):
-                think = '\n'.join(lines[:i])
-                reply = '\n'.join(lines[i:])
-                return '<think>' + think + '</think>\n' + reply
-
-        # Try within-line split — model mashed thinking + reply on one line
-        # Look for reply pattern after a period or sentence end
-        for p in reply_starts:
-            # Match: "...reasoning text.Reply text" or "...reasoning text. Reply text"
-            pattern = r'([.!?])\s*(' + re.escape(p) + r')'
-            m = re.search(pattern, stripped_text)
-            if m and m.start() > 20:  # at least 20 chars of reasoning before
-                think = stripped_text[:m.start() + 1]  # include the period
-                reply = stripped_text[m.start() + 1:].lstrip()
-                return '<think>' + think + '</think>\n' + reply
-
-        # Last resort: find last non-reasoning line
-        for i in range(len(lines) - 1, 0, -1):
-            stripped = lines[i].strip()
-            if stripped and not any(stripped.startswith(p) for p in reasoning_starts) and not stripped.startswith('*') and len(stripped) > 3:
-                think = '\n'.join(lines[:i])
-                reply = '\n'.join(lines[i:])
-                return '<think>' + think + '</think>\n' + reply
-
-    return text
-
-
-def _extract_thinking_meta(text: str) -> dict | None:
-    """Extract thinking content into metadata, return {thinking, reply, time} or None."""
-    import re
-    if not text:
-        return None
-    from src.text_helpers import normalize_thinking_markup
-    original_text = text
-    text = normalize_thinking_markup(text)
-    normalized_changed = text != original_text
-
-    # Check for <think> tags (native or injected)
-    time_match = re.search(r'<think(?:ing)?\s+time="([\d.]+)"', text)
-    think_time = time_match.group(1) if time_match else None
-    # Strip time attr for parsing
-    clean = re.sub(r'<think(?:ing)?\s+time="[\d.]+"', '<think', text)
-
-    think_match = re.match(r'^[\s]*<think(?:ing)?>([\s\S]*?)</think(?:ing)?>\s*([\s\S]*)', clean, re.IGNORECASE)
-    if think_match:
-        thinking = think_match.group(1).strip()
-        reply = think_match.group(2).strip()
-        # Only strip the thinking out into metadata when there's an actual reply
-        # left over. If reply is empty (model hit max_tokens inside <think>, or
-        # the turn was reasoning-only), keep the raw text as content — otherwise
-        # the saved message has empty content and the bubble looks blank on
-        # reload. The renderer's processWithThinking still extracts the <think>
-        # block visually at display time, so nothing changes for the normal case.
-        if thinking and reply:
-            return {"thinking": thinking, "reply": reply, "time": think_time}
-
-    # Detect Thinking Process: or Gemma-style reasoning
-    normalized = _normalize_thinking(text)
-    if '<think>' in normalized:
-        think_match2 = re.match(r'^[\s]*<think(?:ing)?>([\s\S]*?)</think(?:ing)?>\s*([\s\S]*)', normalized, re.IGNORECASE)
-        if think_match2:
-            thinking = think_match2.group(1).strip()
-            reply = think_match2.group(2).strip()
-            if thinking and reply:
-                return {"thinking": thinking, "reply": reply, "time": think_time}
-
-    if normalized_changed and text.strip() and text.strip() != original_text.strip():
-        return {"thinking": "", "reply": text.strip(), "time": think_time}
-
-    return None
+def public_response_delta(data: dict) -> str:
+    """Return only answer-channel text from a structured model stream event."""
+    if not isinstance(data, dict) or data.get("thinking") is True:
+        return ""
+    delta = data.get("delta")
+    return delta if isinstance(delta, str) else ""
 
 
 def clean_thinking_for_save(content: str, metadata: dict | None = None) -> tuple[str, dict]:
-    """Extract thinking from content into metadata. Use for save paths that bypass save_assistant_response."""
+    """Remove private model reasoning before saving a user-facing response."""
     md = dict(metadata) if metadata else {}
-    info = _extract_thinking_meta(content)
-    if info:
-        if info.get("thinking"):
-            md["thinking"] = info["thinking"]
-        if info.get("time"):
-            md["thinking_time"] = info["time"]
-        return info["reply"], md
-    return content, md
+    md.pop("thinking", None)
+    md.pop("thinking_time", None)
+    return strip_think(content, prose=False, prompt_echo=False), md
+
+
+def require_user_facing_answer(response: Any) -> str:
+    """Reject an empty final answer instead of reporting a blank success."""
+    if not isinstance(response, str) or not response.strip():
+        raise HTTPException(
+            status_code=502,
+            detail="The model returned no user-facing answer. Please try again.",
+        )
+    return response
 
 
 def save_assistant_response(
@@ -1109,16 +1005,16 @@ def save_assistant_response(
     if tool_events:
         md["tool_events"] = tool_events
 
-    # Extract thinking into metadata (don't pollute message content with <think> tags)
-    _think_info = _extract_thinking_meta(full_response)
-    if _think_info:
-        if _think_info.get("thinking"):
-            md["thinking"] = _think_info["thinking"]
-        if _think_info.get("time"):
-            md["thinking_time"] = _think_info.get("time")
-        _content = _think_info["reply"]
-    else:
-        _content = full_response
+    md.pop("thinking", None)
+    md.pop("thinking_time", None)
+    if isinstance(md.get("round_texts"), list):
+        md["round_texts"] = [
+            strip_think(text, prose=False, prompt_echo=False)
+            if isinstance(text, str)
+            else text
+            for text in md["round_texts"]
+        ]
+    _content = strip_think(full_response, prose=False, prompt_echo=False)
     if incognito:
         _append_incognito_message(session_id, "assistant", _content, md)
         return None

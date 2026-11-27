@@ -71,7 +71,7 @@ def test_wrong_owner_cannot_consume_but_deny_retires_pending_action():
         owner="mallory",
         session_id="session-1",
     ) is None
-    assert store.peek(wrong_owner.approval_id) == wrong_owner
+    assert store.peek(wrong_owner.approval_id, owner="alice", session_id="session-1") == wrong_owner
 
     denied = _pending(store)
     assert store.consume(
@@ -80,7 +80,7 @@ def test_wrong_owner_cannot_consume_but_deny_retires_pending_action():
         owner="alice",
         session_id="session-1",
     ) is None
-    assert store.peek(denied.approval_id) is None
+    assert store.peek(denied.approval_id, owner="alice", session_id="session-1") is None
 
 
 def test_expired_approval_cannot_be_consumed(monkeypatch):
@@ -101,8 +101,8 @@ def test_new_session_approval_supersedes_prior_pending_action():
     first = _pending(store, content="printf first")
     second = _pending(store, content="printf second")
 
-    assert store.peek(first.approval_id) is None
-    assert store.peek(second.approval_id) == second
+    assert store.peek(first.approval_id, owner="alice", session_id="session-1") is None
+    assert store.peek(second.approval_id, owner="alice", session_id="session-1") == second
 
 
 def test_ordinary_session_turn_retires_pending_action_and_preserves_taint():
@@ -110,9 +110,9 @@ def test_ordinary_session_turn_retires_pending_action_and_preserves_taint():
     pending = _pending(store, owner="Alice", session_id="session-1")
 
     assert store.retire_for_session(owner="bob", session_id="session-1") is False
-    assert store.peek(pending.approval_id) == pending
+    assert store.peek(pending.approval_id, owner="alice", session_id="session-1") == pending
     assert store.retire_for_session(owner="alice", session_id="session-1") is True
-    assert store.peek(pending.approval_id) is None
+    assert store.peek(pending.approval_id, owner="alice", session_id="session-1") is None
     assert store.retire_for_session(owner="alice", session_id=None) is False
 
 
@@ -121,8 +121,18 @@ def test_independent_headless_runs_do_not_supersede_each_other():
     first = _pending(store, session_id=None, origin_run_id="headless-1")
     second = _pending(store, session_id=None, origin_run_id="headless-2")
 
-    assert store.peek(first.approval_id) == first
-    assert store.peek(second.approval_id) == second
+    assert store.peek(first.approval_id, owner="alice", session_id="") == first
+    assert store.peek(second.approval_id, owner="alice", session_id="") == second
+
+
+def test_owner_deletion_retires_all_pending_approvals():
+    store = ToolApprovalStore()
+    alice = _pending(store, session_id="session-alice")
+    bob = _pending(store, session_id="session-bob", owner="bob")
+
+    assert store.retire_for_owner("alice") == 1
+    assert store.peek(alice.approval_id, owner="alice", session_id="session-alice") is None
+    assert store.peek(bob.approval_id, owner="bob", session_id="session-bob") == bob
 
 
 def test_public_payload_shows_complete_action_but_not_authority_fields():

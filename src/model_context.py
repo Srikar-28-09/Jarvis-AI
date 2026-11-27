@@ -393,6 +393,38 @@ def _proxy_catalog_context(endpoint_url: str, model: str) -> Optional[int]:
     return None
 
 
+def _ollama_context_from_show(models_url: Optional[str], model: str) -> Optional[int]:
+    """Read the selected model's actual context length from Ollama metadata."""
+    if not models_url or not models_url.rstrip("/").endswith("/api/tags"):
+        return None
+
+    show_url = models_url.rstrip("/")[:-len("tags")] + "show"
+    try:
+        response = httpx.post(
+            show_url,
+            json={"model": model},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if not response.is_success:
+            return None
+        model_info = response.json().get("model_info")
+        if not isinstance(model_info, dict):
+            return None
+        candidates = [
+            int(value)
+            for key, value in model_info.items()
+            if isinstance(key, str)
+            and key.endswith(".context_length")
+            and "vision" not in key.lower().split(".")
+            and isinstance(value, (int, float))
+            and value > 0
+        ]
+        return candidates[0] if candidates else None
+    except Exception as e:
+        logger.debug("Failed to query Ollama model context for %s: %s", model, e)
+        return None
+
+
 def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Query the model API for context length. Returns (context_length, known) where
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
@@ -446,6 +478,12 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     from src.endpoint_resolver import build_models_url
 
     models_url = build_models_url(endpoint_url)
+    if is_local_endpoint(endpoint_url):
+        ollama_ctx = _ollama_context_from_show(models_url, model)
+        if ollama_ctx:
+            logger.info("Ollama model metadata reports context window for %s: %d", model, ollama_ctx)
+            return ollama_ctx, True
+
     try:
         r = httpx.get(models_url, timeout=REQUEST_TIMEOUT)
         if r.is_success:

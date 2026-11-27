@@ -1,12 +1,13 @@
 export const STATES = Object.freeze({
-  IDLE: 'idle', LISTENING: 'listening', TRANSCRIBING: 'transcribing',
+  IDLE: 'idle', LISTENING: 'listening', PROCESSING: 'processing', TRANSCRIBING: 'transcribing',
   THINKING: 'thinking', SYNTHESIZING: 'synthesizing', SPEAKING: 'speaking',
   INTERRUPTED: 'interrupted', ERROR: 'error',
 });
 
 const ALLOWED = {
   idle: ['listening', 'thinking', 'error'],
-  listening: ['idle', 'transcribing', 'thinking', 'interrupted', 'error'],
+  listening: ['idle', 'processing', 'transcribing', 'thinking', 'interrupted', 'error'],
+  processing: ['transcribing', 'idle', 'interrupted', 'error'],
   transcribing: ['thinking', 'listening', 'idle', 'interrupted', 'error'],
   thinking: ['synthesizing', 'listening', 'idle', 'interrupted', 'error'],
   synthesizing: ['speaking', 'listening', 'idle', 'interrupted', 'error'],
@@ -30,6 +31,7 @@ export class ConversationController {
     this._lockToken = 0;
     this._lifecycleToken = 0;
     this._startPromise = null;
+    this._stopPromise = null;
   }
 
   transition(next, detail = '') {
@@ -67,27 +69,54 @@ export class ConversationController {
   }
 
   async stopListening() {
-    this.listeningWanted = false;
-    this._lifecycleToken++;
-    await this.adapter.stopCapture(false);
-    if (this.state === STATES.LISTENING) this.transition(STATES.IDLE);
+    if (this._stopPromise) return this._stopPromise;
+    if (this.state !== STATES.LISTENING) return false;
+    const pending = (async () => {
+      this.listeningWanted = false;
+      this._lifecycleToken++;
+      let blob;
+      try {
+        blob = await this.adapter.stopCapture(true);
+      } catch (error) {
+        if (this.state === STATES.LISTENING) await this._recover(error);
+        return false;
+      }
+      if (this.state !== STATES.LISTENING) return false;
+      if (blob?.size) return this.submitAudio(blob);
+      this.transition(STATES.IDLE);
+      this.adapter.onNotice?.('No speech was captured. Try again or type a message.');
+      return false;
+    })();
+    this._stopPromise = pending;
+    try { return await pending; }
+    finally { if (this._stopPromise === pending) this._stopPromise = null; }
   }
 
   async submitAudio(blob) {
     if (this._inFlight || this.state !== STATES.LISTENING) return false;
+    if (!blob?.size) {
+      this.adapter.onNotice?.('No audio was captured. Try again or type a message.');
+      return false;
+    }
     this._inFlight = true;
     const lockToken = ++this._lockToken;
-    this.listeningWanted = true;
     const turn = ++this.turnCounter;
     this.activeTurn = this.adapter.createRequestId?.() || `voice-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${turn}`}`;
     const turnId = this.activeTurn;
-    this.transition(STATES.TRANSCRIBING);
+    this.transition(STATES.PROCESSING);
     try {
       await this.adapter.stopCapture(false);
       if (this.activeTurn !== turnId) return false;
+      this.transition(STATES.TRANSCRIBING);
       const text = (await this.adapter.transcribe(blob, turnId)).trim();
+      if (this.activeTurn !== turnId) return false;
       if (!text) throw new Error('No speech was recognized. Try again or type a message.');
-      return await this._send(text, turnId);
+      this.adapter.onVoiceTranscript?.(text);
+      this.activeTurn = null;
+      this.runId = '';
+      this.listeningWanted = false;
+      this.transition(STATES.IDLE);
+      return true;
     } catch (error) {
       if (this.activeTurn === turnId) await this._recover(error);
       return false;
@@ -96,9 +125,10 @@ export class ConversationController {
     }
   }
 
-  async sendText(text) {
+  async sendText(text, { speakResponse = false } = {}) {
     const cleaned = String(text || '').trim();
     if (!cleaned || this._inFlight) return false;
+    const resumeVoice = speakResponse || (this.state === STATES.LISTENING && this.listeningWanted);
     this._inFlight = true;
     const lockToken = ++this._lockToken;
     this._lifecycleToken++;
@@ -109,7 +139,7 @@ export class ConversationController {
       await this._recover(error);
       return false;
     }
-    this.listeningWanted = true;
+    this.listeningWanted = resumeVoice;
     const key = cleaned.toLocaleLowerCase();
     const now = Date.now();
     if (this.lastTurnKey === key && now - this._lastSentAt < 1200) { this._inFlight = false; return false; }

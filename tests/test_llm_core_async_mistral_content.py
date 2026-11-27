@@ -1,13 +1,13 @@
-"""Integration regression test for #5435.
+"""Integration regression tests for Mistral's structured reasoning output.
 
-llm_call_async must normalise Mistral structured content to a plain string,
-matching llm_call (sync) and stream_llm. Before the fix, the async
-non-streaming parser returned the raw list when Mistral reasoning was enabled,
-violating its -> str contract, leaking a non-string into callers such as
-auto-title generation and memory extraction, and poisoning _response_cache
-with a non-string value.
+llm_call_async must normalize Mistral structured content to user-facing text,
+matching llm_call (sync) and stream_llm, without returning the private thinking
+block as an answer.
 """
 import asyncio
+
+import pytest
+from fastapi import HTTPException
 
 import src.llm_core as llm_core
 
@@ -50,20 +50,17 @@ def test_llm_call_async_normalizes_mistral_structured_content(monkeypatch):
     ])
     assert isinstance(out, str), f"expected str, got {type(out).__name__}"
     assert "The answer is 42." in out
-    assert "Let me work through this..." in out
-    # The cache must hold the normalised string, not the raw list,
-    # otherwise repeat calls serve the poisoned value.
+    assert "Let me work through this..." not in out
     assert all(isinstance(v, str) for v in llm_core._response_cache.values())
 
 
-def test_llm_call_async_thinking_only_still_returns_str(monkeypatch):
-    out = _call(monkeypatch, [
-        {"type": "thinking",
-         "thinking": [{"type": "text", "text": "still thinking"}],
-         "closed": True},
-    ])
-    assert isinstance(out, str)
-    assert "still thinking" in out
+def test_llm_call_async_thinking_only_fails_without_exposing_reasoning(monkeypatch):
+    with pytest.raises(HTTPException, match="no final answer"):
+        _call(monkeypatch, [
+            {"type": "thinking",
+             "thinking": [{"type": "text", "text": "still thinking"}],
+             "closed": True},
+        ])
 
 
 def test_llm_call_async_plain_string_passthrough(monkeypatch):

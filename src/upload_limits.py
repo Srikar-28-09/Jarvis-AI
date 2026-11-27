@@ -33,6 +33,25 @@ def get_chat_upload_max_bytes() -> int:
     return read_byte_limit_env(CHAT_UPLOAD_MAX_BYTES_ENV, DEFAULT_CHAT_UPLOAD_MAX_BYTES)
 
 
+def get_persistent_upload_quota_bytes() -> int:
+    """Optional per-owner persisted upload storage cap.
+
+    A value of zero preserves existing installations by disabling the cap.
+    """
+    raw = os.getenv("ODYSSEUS_UPLOAD_STORAGE_LIMIT_PER_USER_MB", "0").strip()
+    try:
+        megabytes = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "ODYSSEUS_UPLOAD_STORAGE_LIMIT_PER_USER_MB must be a non-negative integer"
+        )
+    if megabytes < 0:
+        raise ValueError(
+            "ODYSSEUS_UPLOAD_STORAGE_LIMIT_PER_USER_MB must be a non-negative integer"
+        )
+    return megabytes * 1024 * 1024
+
+
 # Per-route upload byte-limits, single-sourced here (issue #3364). Each is
 # validated + env-overridable via read_byte_limit_env: set the matching
 # ODYSSEUS_*_MAX_BYTES env var to an integer byte count to tune it; an invalid

@@ -1,6 +1,12 @@
 #!/usr/bin/env sh
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+SCRIPT_PATH=$(readlink -f -- "$0")
+ROOT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)
+if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != "--toggle" ]; }; then
+  echo "Usage: odysseus-voice [--toggle]" >&2
+  exit 2
+fi
+cd "$ROOT/.."
 if [ -x "$ROOT/src-tauri/target/release/odysseus-voice" ]; then
   exec "$ROOT/src-tauri/target/release/odysseus-voice" "$@"
 fi

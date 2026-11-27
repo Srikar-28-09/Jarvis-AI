@@ -353,6 +353,12 @@ class ToolApprovalStore:
         external_untrusted_context_seen: bool,
         capabilities: ToolCapabilities,
     ) -> PendingToolApproval:
+        from src.owner_identity import effective_storage_owner
+
+        resolved_owner = effective_storage_owner(owner)
+        if not resolved_owner:
+            raise ValueError("Tool approval requires a canonical owner")
+        owner = resolved_owner
         now = time.time()
         effects = tuple(sorted(effect.value for effect in capabilities.effects))
         result_integrity = capabilities.result_integrity.value
@@ -489,11 +495,28 @@ class ToolApprovalStore:
             allow_remaining_actions=True,
         )
 
-    def peek(self, approval_id: Any) -> PendingToolApproval | None:
+    def peek(
+        self,
+        approval_id: Any,
+        *,
+        owner: Any = None,
+        session_id: Any = None,
+    ) -> PendingToolApproval | None:
+        if owner is None:
+            return None
+        from src.owner_identity import effective_storage_owner
+        normalized_owner = effective_storage_owner(owner)
+        if not normalized_owner:
+            return None
         now = time.time()
         with self._lock:
             self._purge_expired_locked(now)
-            return self._pending.get(str(approval_id or ""))
+            pending = self._pending.get(str(approval_id or ""))
+            if pending is None or pending.owner != normalized_owner:
+                return None
+            if session_id is not None and pending.session_id != str(session_id or ""):
+                return None
+            return pending
 
     def retire_for_session(self, *, owner: Any, session_id: Any) -> bool:
         """Discard pending actions superseded by an ordinary user turn.
@@ -524,6 +547,24 @@ class ToolApprovalStore:
             for approval_id in retired_ids:
                 self._pending.pop(approval_id, None)
         return carried_taint
+
+    def retire_for_owner(self, owner: Any) -> int:
+        """Discard every pending approval owned by a canonical owner."""
+        if owner is None:
+            return 0
+        from src.owner_identity import effective_storage_owner
+        normalized_owner = effective_storage_owner(owner)
+        if not normalized_owner:
+            return 0
+        now = time.time()
+        retired = 0
+        with self._lock:
+            self._purge_expired_locked(now)
+            for approval_id, pending in list(self._pending.items()):
+                if pending.owner == normalized_owner:
+                    self._pending.pop(approval_id, None)
+                    retired += 1
+        return retired
 
 
 tool_approval_store = ToolApprovalStore()

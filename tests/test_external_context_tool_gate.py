@@ -801,6 +801,7 @@ def test_fake_weak_model_search_then_bash_next_round_is_blocked(monkeypatch):
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this and inspect my workspace"}],
+            owner="alice",
             max_rounds=2,
             relevant_tools={"web_search", "bash"},
         )
@@ -838,6 +839,7 @@ def test_fake_weak_model_search_then_bash_same_batch_is_blocked(monkeypatch):
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this and inspect my workspace"}],
+            owner="alice",
             max_rounds=2,
             relevant_tools={"web_search", "bash"},
         )
@@ -872,6 +874,7 @@ def test_search_then_model_controlled_fetch_same_batch_is_blocked(monkeypatch):
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this"}],
+            owner="alice",
             max_rounds=2,
             relevant_tools={"web_search", "web_fetch"},
         )
@@ -905,6 +908,7 @@ def test_search_then_document_same_batch_has_no_editor_side_effect(monkeypatch):
             "http://local.test/v1",
             "small-local-model",
             [{"role": "user", "content": "research this and write a document"}],
+            owner="alice",
             max_rounds=2,
             relevant_tools={"web_search", "create_document"},
         )
@@ -939,6 +943,7 @@ def test_initial_external_context_blocks_document_before_editor_side_effect(monk
             "http://local.test/v1",
             "small-local-model",
             messages,
+            owner="alice",
             max_rounds=1,
             relevant_tools={"create_document"},
         )
@@ -1010,6 +1015,7 @@ def test_native_argument_deltas_do_not_mutate_editor_before_gate(monkeypatch):
             "https://api.example.test/v1",
             "gpt-test",
             messages,
+            owner="alice",
             max_rounds=1,
             relevant_tools={"create_document"},
         )
@@ -1059,6 +1065,7 @@ def test_tainted_native_route_keeps_action_schema_for_exact_approval(monkeypatch
             "https://api.openai.com/v1",
             "gpt-test",
             messages,
+            owner="alice",
             max_rounds=1,
             relevant_tools={"update_document"},
         )
@@ -1227,7 +1234,11 @@ def test_tainted_document_approval_seals_current_content(monkeypatch):
         for event in events
         if event.get("ask_user", {}).get("kind") == "tool_approval"
     )
-    pending = agent_loop.tool_approval_store.peek(approval["approval_id"])
+    pending = agent_loop.tool_approval_store.peek(
+        approval["approval_id"],
+        owner="alice",
+        session_id="document-approval-session",
+    )
     assert pending is not None
     assert pending.document_id == "document-7"
     assert pending.document_version == 4
@@ -1280,6 +1291,7 @@ def test_approval_pause_does_not_trigger_teacher_takeover(monkeypatch):
                 untrusted_context_message("stored context", "untrusted"),
             ],
             session_id="session-1",
+            owner="alice",
             max_rounds=1,
             relevant_tools={"bash"},
         )

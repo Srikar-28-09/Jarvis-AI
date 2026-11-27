@@ -168,7 +168,7 @@ def test_deny_executes_nothing_and_grants_no_task_or_chat_scope():
         owner="alice",
         session_id="session-1",
     ) is None
-    assert store.peek(pending.approval_id) is None
+    assert store.peek(pending.approval_id, owner="alice", session_id="session-1") is None
 
     denied_card = pending.public_payload()
     denied_card["resolved"] = "deny"

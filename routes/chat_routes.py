@@ -64,6 +64,8 @@ from routes.chat_helpers import (
     run_post_response_tasks,
     accumulate_token_usage,
     clean_thinking_for_save,
+    public_response_delta,
+    require_user_facing_answer,
     _allowed_models_for_request,
     _enforce_chat_privileges,
 )
@@ -973,6 +975,7 @@ def setup_chat_routes(
             prompt_type=preset_id,
             session_id=session,
         )
+        reply = require_user_facing_answer(reply)
         actual_index = _candidate_index(foreground_candidates, actual_candidate)
         apply_compaction_state(
             sess,
@@ -1319,8 +1322,12 @@ def setup_chat_routes(
             owner = effective_user(request)
             if tool_approval_id:
                 _reject_delegated_tool_approval(request)
-                pending_tool_approval = tool_approval_store.peek(tool_approval_id)
                 normalized_owner = str(owner or "").strip().casefold()
+                pending_tool_approval = tool_approval_store.peek(
+                    tool_approval_id,
+                    owner=normalized_owner,
+                    session_id=session,
+                )
                 if (
                     pending_tool_approval is None
                     or pending_tool_approval.owner != normalized_owner
@@ -1651,12 +1658,21 @@ def setup_chat_routes(
 
             try:
                 _detached_run = agent_runs.start(
-                    session, _simple_response_stream(), request_id=client_request_id
+                    session,
+                    _simple_response_stream(),
+                    request_id=client_request_id,
+                    owner=effective_user(request),
                 )
+            except agent_runs.PerUserLimitError:
+                raise HTTPException(429, "Per-user concurrent agent-run limit reached")
             except ValueError:
                 raise HTTPException(409, "This request ID is already assigned to a different session.")
             return StreamingResponse(
-                agent_runs.subscribe(session, _detached_run),
+                agent_runs.subscribe(
+                    session,
+                    _detached_run,
+                    owner=effective_user(request),
+                ),
                 media_type="text/event-stream",
                 headers={"X-Odysseus-Run-Id": _detached_run.run_id},
             )
@@ -2139,7 +2155,7 @@ def setup_chat_routes(
                 yield f"data: {json.dumps({'type': 'context_trimmed', 'data': {'context_length': ctx.context_length, 'messages_before': ctx.context_messages_before_trim, 'messages_after': ctx.context_messages_after_trim, 'tokens_before': ctx.context_tokens_before_trim, 'tokens_after': ctx.context_tokens_after_trim}})}\n\n"
 
             full_response = ""
-            thinking_response = ""
+            thinking_chars = 0
             last_metrics = None
 
             # Foreground Chat and Agent requests share one explicit owner-aware
@@ -2344,29 +2360,29 @@ def setup_chat_routes(
                             try:
                                 data = json.loads(chunk[6:])
                                 if "delta" in data:
+                                    if data.get("thinking"):
+                                        thinking_chars += len(data.get("delta") or "")
+                                        continue
+                                    public_delta = public_response_delta(data)
+                                    if not public_delta:
+                                        continue
                                     if _commit_chat_compaction(_actual_candidate_index):
                                         _compacted_length = _chat_request_state["context_lengths"].get(
                                             _actual_candidate_index,
                                             _selected_context_length,
                                         )
                                         yield f'data: {json.dumps({"type": "compacted", "context_length": _compacted_length})}\n\n'
-                                    # Reasoning tokens arrive flagged thinking:true.
-                                    # Forward them so the client can show a thinking
-                                    # indicator, but don't fold them into the saved
-                                    # reply (mirrors the rewrite path below).
-                                    if data.get("thinking"):
-                                        thinking_response += data["delta"]
-                                    else:
-                                        if data["delta"] and not _first_answer_logged:
-                                            _first_answer_logged = True
-                                            logger.info(
-                                                "[chat_latency] request_id=%s stage=first_answer_token elapsed_ms=%.1f",
-                                                client_request_id or "-",
-                                                (time.perf_counter() - request_started) * 1000,
-                                            )
-                                        full_response += data["delta"]
-                                        _stream_set(session, partial=full_response)
-                                    yield chunk
+                                    if not _first_answer_logged:
+                                        _first_answer_logged = True
+                                        logger.info(
+                                            "[chat_latency] request_id=%s stage=first_answer_token elapsed_ms=%.1f",
+                                            client_request_id or "-",
+                                            (time.perf_counter() - request_started) * 1000,
+                                        )
+                                    data["delta"] = public_delta
+                                    full_response += public_delta
+                                    _stream_set(session, partial=full_response)
+                                    yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "fallback":
                                     # Selected model failed; a fallback answered.
                                     # Forward the notice and remember the real model.
@@ -2406,7 +2422,9 @@ def setup_chat_routes(
                                             _selected_context_length,
                                         )
                                         yield f'data: {json.dumps({"type": "compacted", "context_length": _compacted_length})}\n\n'
-                                    last_metrics = data.get("data", {})
+                                    last_metrics = dict(data.get("data") or {})
+                                    last_metrics.pop("thinking", None)
+                                    last_metrics.pop("thinking_time", None)
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -2464,7 +2482,7 @@ def setup_chat_routes(
                             logger.warning(f"Stream error for {sess.model} on {sess.endpoint_url}: {chunk!r}")
                             if (
                                 not _chat_terminal_saved
-                                and (full_response.strip() or thinking_response.strip())
+                                and full_response.strip()
                             ):
                                 _failure_status = _stream_failure_status(chunk)
                                 _failure_message = (
@@ -2492,7 +2510,7 @@ def setup_chat_routes(
                                     )
                                     _estimated_input = estimate_tokens(_actual_request_messages)
                                     _estimated_output = max(
-                                        len(full_response + thinking_response) // 4,
+                                        (len(full_response) + thinking_chars) // 4,
                                         0,
                                     )
                                     _terminal_metrics.update({
@@ -2534,8 +2552,6 @@ def setup_chat_routes(
                                     _terminal_metrics["endpoint_cost_tracked"] = _actual_route.get(
                                         "endpoint_cost_tracked"
                                     )
-                                if thinking_response.strip():
-                                    _terminal_metrics["thinking"] = thinking_response.strip()
                                 _commit_chat_compaction(_actual_candidate_index)
                                 _saved_id = save_assistant_response(
                                     sess,
@@ -2562,6 +2578,16 @@ def setup_chat_routes(
                                 # never re-save/post-process it as a success or
                                 # advertise successful completion to the client.
                                 continue
+                            if not full_response.strip():
+                                try:
+                                    require_user_facing_answer(full_response)
+                                except HTTPException as error:
+                                    _stream_set(session, status="error")
+                                    yield (
+                                        f'event: error\ndata: {json.dumps({"error": error.detail, "status": error.status_code})}\n\n'
+                                    )
+                                    yield chunk
+                                    continue
                             # Generate fallback metrics if LLM didn't send usage
                             if not last_metrics and full_response:
                                 _elapsed = time.time() - _chat_start
@@ -2604,8 +2630,6 @@ def setup_chat_routes(
                             if full_response:
                                 _commit_chat_compaction(_actual_candidate_index)
                                 _metrics_to_save = dict(last_metrics or {})
-                                if thinking_response.strip() and not _metrics_to_save.get("thinking"):
-                                    _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
                                     sess, session_manager, session, full_response, _metrics_to_save,
                                     character_name=ctx.preset.character_name,
@@ -2740,15 +2764,16 @@ def setup_chat_routes(
                             try:
                                 data = json.loads(chunk[6:])
                                 if "delta" in data:
-                                    # Reasoning tokens arrive flagged thinking:true.
-                                    # Forward them for the live indicator, but keep
-                                    # them out of the saved reply (same as chat mode).
                                     if data.get("thinking"):
-                                        thinking_response += data["delta"]
-                                    else:
-                                        full_response += data["delta"]
-                                        _stream_set(session, partial=full_response)
-                                    yield chunk
+                                        thinking_chars += len(data.get("delta") or "")
+                                        continue
+                                    public_delta = public_response_delta(data)
+                                    if not public_delta:
+                                        continue
+                                    data["delta"] = public_delta
+                                    full_response += public_delta
+                                    _stream_set(session, partial=full_response)
+                                    yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "web_sources":
                                     web_sources = data.get("data", [])
                                     yield chunk
@@ -2811,6 +2836,13 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "agent_terminal":
                                     terminal_metadata = dict(data.get("data") or {})
+                                    terminal_metadata.pop("thinking", None)
+                                    terminal_metadata.pop("thinking_time", None)
+                                    if isinstance(terminal_metadata.get("round_texts"), list):
+                                        terminal_metadata["round_texts"] = [
+                                            clean_thinking_for_save(str(text))[0]
+                                            for text in terminal_metadata["round_texts"]
+                                        ]
                                     last_metrics = terminal_metadata
                                     failure = terminal_metadata.get("failure") or {}
                                     failure_status = _normalize_http_status(
@@ -2849,9 +2881,17 @@ def setup_chat_routes(
                                         _stream_set(session, status="error")
                                         if _saved_id:
                                             yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
-                                    yield chunk
+                                    data["data"] = terminal_metadata
+                                    yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "metrics":
-                                    last_metrics = data.get("data", {})
+                                    last_metrics = dict(data.get("data") or {})
+                                    last_metrics.pop("thinking", None)
+                                    last_metrics.pop("thinking_time", None)
+                                    if isinstance(last_metrics.get("round_texts"), list):
+                                        last_metrics["round_texts"] = [
+                                            clean_thinking_for_save(str(text))[0]
+                                            for text in last_metrics["round_texts"]
+                                        ]
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -2877,11 +2917,19 @@ def setup_chat_routes(
                             yield chunk
                         elif chunk == "data: [DONE]\n\n":
                             _has_tool_events = bool((last_metrics or {}).get("tool_events"))
+                            if not full_response.strip() and not _has_tool_events:
+                                try:
+                                    require_user_facing_answer(full_response)
+                                except HTTPException as error:
+                                    _stream_set(session, status="error")
+                                    yield (
+                                        f'event: error\ndata: {json.dumps({"error": error.detail, "status": error.status_code})}\n\n'
+                                    )
+                                    yield chunk
+                                    continue
                             if full_response or _has_tool_events:
                                 _response_to_save = full_response or "Done."
                                 _metrics_to_save = dict(last_metrics or {})
-                                if thinking_response.strip() and not _metrics_to_save.get("thinking"):
-                                    _metrics_to_save["thinking"] = thinking_response.strip()
                                 _saved_id = save_assistant_response(
                                     sess, session_manager, session, _response_to_save, _metrics_to_save,
                                     character_name=ctx.preset.character_name,
@@ -3003,11 +3051,22 @@ def setup_chat_routes(
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
         try:
-            _detached_run = agent_runs.start(session, _safe_stream(), request_id=client_request_id)
+            _detached_run = agent_runs.start(
+                session,
+                _safe_stream(),
+                request_id=client_request_id,
+                owner=effective_user(request),
+            )
+        except agent_runs.PerUserLimitError:
+            raise HTTPException(429, "Per-user concurrent agent-run limit reached")
         except ValueError:
             raise HTTPException(409, "This request ID is already assigned to a different session.")
         return StreamingResponse(
-            agent_runs.subscribe(session, _detached_run),
+            agent_runs.subscribe(
+                session,
+                _detached_run,
+                owner=effective_user(request),
+            ),
             media_type="text/event-stream",
             headers={"X-Odysseus-Run-Id": _detached_run.run_id},
         )
@@ -3019,11 +3078,12 @@ def setup_chat_routes(
     @router.get("/api/chat/resume/{session_id}")
     async def chat_resume(request: Request, session_id: str) -> StreamingResponse:
         _verify_session_owner(request, session_id)
-        _active_run = agent_runs.get_active_run(session_id)
+        _owner = effective_user(request)
+        _active_run = agent_runs.get_active_run(session_id, owner=_owner)
         if _active_run is None:
             raise HTTPException(404, "No active run for this session")
         return StreamingResponse(
-            agent_runs.subscribe(session_id, _active_run),
+            agent_runs.subscribe(session_id, _active_run, owner=_owner),
             media_type="text/event-stream",
             headers={"X-Odysseus-Run-Id": _active_run.run_id},
         )
@@ -3036,7 +3096,11 @@ def setup_chat_routes(
     async def chat_stop(request: Request, session_id: str) -> Dict[str, Any]:
         _verify_session_owner(request, session_id)
         _expected_run_id = request.headers.get("X-Odysseus-Run-Id")
-        stopped = agent_runs.stop(session_id, _expected_run_id)
+        stopped = agent_runs.stop(
+            session_id,
+            _expected_run_id,
+            owner=effective_user(request),
+        )
         return {"stopped": stopped}
 
     # ------------------------------------------------------------------ #
@@ -3052,7 +3116,7 @@ def setup_chat_routes(
         # entry in between (same pattern _stream_set already uses).
         rec = _active_streams.get(session_id)
         if rec is None:
-            if agent_runs.is_active(session_id):
+            if agent_runs.is_active(session_id, owner=effective_user(request)):
                 return {"status": "streaming", "detached": True}
             raise HTTPException(404, "No active stream for this session")
         return rec

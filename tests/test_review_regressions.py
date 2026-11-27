@@ -315,7 +315,7 @@ def test_preset_manager_migrates_legacy_default_custom_preset_disabled(tmp_path)
     assert custom["max_tokens"] == 0
 
 
-def test_normalize_thinking_handles_lowercase_thinking_process(monkeypatch):
+def test_untagged_thinking_like_prose_is_not_classified_as_private_reasoning(monkeypatch):
     for mod_name in [
         "starlette.middleware",
         "starlette.middleware.base",
@@ -339,12 +339,7 @@ def test_normalize_thinking_handles_lowercase_thinking_process(monkeypatch):
         "hi"
     )
 
-    normalized = chat_helpers._normalize_thinking(text)
-
-    assert normalized == (
-        "<think>Analyze the Request: The user is explicitly instructing me to use the tag.</think>\n\n"
-        "hi"
-    )
+    assert chat_helpers.public_response_delta({"delta": text}) == text
 
 
 @pytest.mark.asyncio

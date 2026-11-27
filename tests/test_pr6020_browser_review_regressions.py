@@ -244,13 +244,13 @@ async def test_immediate_replacement_closes_subscriber_bound_to_never_started_ru
     async def replacement():
         yield 'data: {"delta":"new"}\n\n'
 
-    first = agent_runs.start(session_id, never_started())
+    first = agent_runs.start(session_id, never_started(), owner="test-owner")
     first_subscription = asyncio.create_task(
         _collect_run_events(session_id, first)
     )
     # Do not yield between starts: first.task is cancelled before _drain gets
     # its first instruction, exactly the race a rapid double-send creates.
-    second = agent_runs.start(session_id, replacement())
+    second = agent_runs.start(session_id, replacement(), owner="test-owner")
 
     assert await asyncio.wait_for(first_subscription, timeout=0.5) == []
     await asyncio.wait_for(second.task, timeout=0.5)
@@ -259,7 +259,7 @@ async def test_immediate_replacement_closes_subscriber_bound_to_never_started_ru
 
 
 async def _collect_run_events(session_id: str, run: object) -> list[str]:
-    return [event async for event in agent_runs.subscribe(session_id, run)]
+    return [event async for event in agent_runs.subscribe(session_id, run, owner="test-owner")]
 
 
 @pytest.mark.skipif(not _HAS_NODE, reason="node binary not on PATH")

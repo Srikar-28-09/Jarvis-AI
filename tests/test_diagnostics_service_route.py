@@ -66,3 +66,41 @@ def test_admin_gets_report(monkeypatch):
     body = r.json()
     assert set(body) == {"overall", "services", "timestamp"}
     assert body["overall"] == "ok"
+
+
+def test_performance_snapshot_requires_admin_and_returns_real_metric_shape(monkeypatch):
+    import services.hwfit.hardware as hardware
+    import src.request_timing as timing
+
+    def gate(_request: Request):
+        return None
+
+    monkeypatch.setattr(hardware, "get_runtime_resources", lambda: {
+        "available_ram_gb": 7.5,
+        "available_vram_gb": None,
+    })
+    monkeypatch.setattr(timing, "get_timing_summary", lambda: {
+        "window": "most recent 256 measurements per stage",
+        "stages": {"chat": {"samples": 1, "average_ms": 23.0}},
+    })
+    client = _client_with_admin_gate(monkeypatch, gate)
+    response = client.get("/api/diagnostics/performance")
+    assert response.status_code == 200
+    assert response.json() == {
+        "timings": {
+            "window": "most recent 256 measurements per stage",
+            "stages": {"chat": {"samples": 1, "average_ms": 23.0}},
+        },
+        "resources": {"available_ram_gb": 7.5, "available_vram_gb": None},
+        "resource_status": "available",
+        "cpu_utilization_pct": None,
+    }
+
+
+def test_performance_snapshot_rejects_non_admin(monkeypatch):
+    def gate(_request: Request):
+        raise HTTPException(403, "Admin only")
+
+    client = _client_with_admin_gate(monkeypatch, gate)
+    response = client.get("/api/diagnostics/performance")
+    assert response.status_code == 403

@@ -254,7 +254,10 @@ def resolve_attention_event(event_id: str, owner: str, *, action: str = "resolve
         if not event:
             return False
         if event.approval_id:
-            pending = tool_approval_store.peek(event.approval_id)
+            pending = tool_approval_store.peek(
+                event.approval_id,
+                owner=owner,
+            )
             if pending and pending.owner == _normalized_owner(owner):
                 tool_approval_store.consume(
                     event.approval_id,
@@ -289,7 +292,10 @@ def start_attention_challenge(event_id: str, owner: str) -> tuple[dict | None, s
         ).first()
         if not event or event.status in TERMINAL_STATUSES or not event.approval_id:
             return None, None
-        pending = tool_approval_store.peek(event.approval_id)
+        pending = tool_approval_store.peek(
+            event.approval_id,
+            owner=owner,
+        )
         if not pending or pending.owner != _normalized_owner(owner):
             return None, None
         code = f"{secrets.randbelow(900000) + 100000}"
@@ -356,7 +362,10 @@ def verify_attention_challenge(
         if not secrets.compare_digest(supplied, str(event.challenge_code_hash or "")):
             db.commit()
             return False, "challenge_invalid"
-        pending = tool_approval_store.peek(event.approval_id)
+        pending = tool_approval_store.peek(
+            event.approval_id,
+            owner=owner,
+        )
         if not pending or pending.owner != _normalized_owner(owner):
             event.challenge_status = "rejected"
             db.commit()

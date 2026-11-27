@@ -2,6 +2,7 @@
 
 import logging
 import os
+import asyncio
 from typing import Dict, Any
 
 from fastapi import APIRouter, HTTPException, Form, Request
@@ -28,6 +29,27 @@ def setup_diagnostics_routes(
         require_admin(request)
         from src.service_health import collect_service_health
         return await collect_service_health(rag_manager, memory_vector)
+
+    @router.get("/api/diagnostics/performance")
+    async def get_performance_snapshot(request: Request) -> Dict[str, Any]:
+        require_admin(request)
+        from src.request_timing import get_timing_summary
+        from services.hwfit.hardware import get_runtime_resources
+
+        try:
+            resources = await asyncio.wait_for(
+                asyncio.to_thread(get_runtime_resources), timeout=5
+            )
+            resource_status = "available"
+        except asyncio.TimeoutError:
+            resources = {"available_ram_gb": None, "available_vram_gb": None}
+            resource_status = "timed_out"
+        return {
+            "timings": get_timing_summary(),
+            "resources": resources,
+            "resource_status": resource_status,
+            "cpu_utilization_pct": None,
+        }
 
     @router.get("/api/diagnostics/logs")
     async def get_diagnostics_logs(request: Request, limit: int = 200) -> Dict[str, Any]:

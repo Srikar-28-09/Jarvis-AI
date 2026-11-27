@@ -7,6 +7,8 @@ from unittest.mock import Mock
 from src.simple_intents import (
     answer_simple_request,
     answer_length_policy,
+    follow_up_context_instruction,
+    follow_up_kind,
     is_low_effort_conversation,
     reply_token_limit,
 )
@@ -17,8 +19,8 @@ def test_time_answer_uses_request_local_timezone_and_live_datetime():
     set_user_tz_name("Asia/Kolkata")
     try:
         now = datetime(2026, 10, 14, 6, 45, tzinfo=timezone.utc)
-        assert answer_simple_request("What time is it?", now=now) == "It’s 12:15 PM, Sir."
-        assert answer_simple_request("What's today's date?", now=now) == "It’s Wednesday, October 14, Sir."
+        assert answer_simple_request("What time is it?", now=now) == "It’s 12:15 PM."
+        assert answer_simple_request("What's today's date?", now=now) == "It’s Wednesday, October 14."
         for phrase in (
             "what time is it right now???",
             "What time is it right now?",
@@ -26,7 +28,7 @@ def test_time_answer_uses_request_local_timezone_and_live_datetime():
             "Tell me the time right now!!!",
             "current time",
         ):
-            assert answer_simple_request(phrase, now=now) == "It’s 12:15 PM, Sir."
+            assert answer_simple_request(phrase, now=now) == "It’s 12:15 PM."
     finally:
         clear_user_time_context()
 
@@ -98,7 +100,51 @@ def test_complex_answers_keep_reasoning_and_explicit_detail_instruction():
     chat_style = (root / "src/chat_processor.py").read_text(encoding="utf-8")
     agent_rules = (root / "src/agent_loop.py").read_text(encoding="utf-8")
     assert "user asks for detail or the task needs it." in chat_style
+    assert "avoid honorifics unless the user asks for them" in chat_style
+    assert "define necessary technical terms" in chat_style
+    assert "treat unrelated questions as" in chat_style
     assert "Expand when asked or when the task needs detail." in agent_rules
+    assert "immediately preceding relevant exchange" in agent_rules
+
+
+def test_contextual_follow_up_intents_cover_common_transformations():
+    cases = {
+        "Explain it simply.": "simplify",
+        "Give me a real-world example.": "example",
+        "Explain that in more detail.": "detail",
+        "Summarize that in three sentences.": "summarize",
+        "Compare it with Java.": "compare",
+        "Rephrase that.": "rephrase",
+        "Explain it again.": "rephrase",
+        "Continue from there.": "continue",
+        "Make it shorter.": "shorten",
+        "Expand on that.": "expand",
+        "Explain it step by step.": "step_by_step",
+    }
+
+    for message, expected in cases.items():
+        assert follow_up_kind(message) == expected
+
+
+def test_follow_up_context_is_conditional_and_requests_clarification_without_history():
+    guidance = follow_up_context_instruction(
+        "Explain it simply.",
+        has_prior_exchange=True,
+    )
+    assert "immediately preceding exchange" in guidance
+    assert "simplify" in guidance
+    assert "ask one concise question" in guidance
+    missing_context = follow_up_context_instruction(
+        "Explain it simply.",
+        has_prior_exchange=False,
+    )
+    assert missing_context.endswith("ask one concise clarifying question instead of guessing.")
+    assert follow_up_context_instruction(
+        "What is photosynthesis?",
+        has_prior_exchange=True,
+    ) is None
+    assert follow_up_kind("Explain photosynthesis simply.") is None
+    assert follow_up_kind("Give me an example of photosynthesis.") is None
 
 
 def test_explicit_academic_answer_length_overrides_the_short_reply_cap():
@@ -220,15 +266,32 @@ def test_reasoning_markup_is_kept_out_of_the_user_facing_answer():
         "<think>Let me think through the answer.</think>It's 4:15 PM."
     )
     assert answer == "It's 4:15 PM."
-    assert metadata["thinking"] == "Let me think through the answer."
+    assert "thinking" not in metadata
 
     voice_source = (Path(__file__).resolve().parents[1] / "static/js/chat.js").read_text(encoding="utf-8")
     assert "extractThinkingBlocks(accumulated || '').content.trim()" in voice_source
     assert "enqueue(voiceAnswer" in voice_source
+    chat_routes = (Path(__file__).resolve().parents[1] / "routes/chat_routes.py").read_text(encoding="utf-8")
+    assert chat_routes.count("public_response_delta(data)") == 2
+    desktop_source = (Path(__file__).resolve().parents[1] / "desktop/src-tauri/src/main.rs").read_text(encoding="utf-8")
+    assert 'event.get("thinking").and_then(Value::as_bool).unwrap_or(false)' in desktop_source
     style = (Path(__file__).resolve().parents[1] / "static/style.css").read_text(encoding="utf-8")
     html = (Path(__file__).resolve().parents[1] / "static/index.html").read_text(encoding="utf-8")
     assert ".thinking-section,\n.agent-thread { display: none !important; }" in style
     assert 'data-ui-key="show-thinking"' not in html
+    renderer = (Path(__file__).resolve().parents[1] / "static/js/chatRenderer.js").read_text(encoding="utf-8")
+    assert "metadata?.thinking" not in renderer
+    assert "return content || raw;" not in renderer
+
+
+def test_clarification_prompt_is_shared_with_text_and_agent_routes():
+    root = Path(__file__).resolve().parents[1]
+    routes = (root / "routes/chat_routes.py").read_text(encoding="utf-8")
+    prompt = (root / "src/chat_processor.py").read_text(encoding="utf-8")
+    assert "ctx = await build_chat_context(" in routes
+    assert "public_response_delta(data)" in routes
+    assert "standard structure/length" in prompt
+    assert "create the draft instead of delaying" in prompt
 
 
 def test_fast_path_runs_before_context_build_and_keeps_request_id_deduplication():
@@ -237,7 +300,8 @@ def test_fast_path_runs_before_context_build_and_keeps_request_id_deduplication(
     context_build = source.index("ctx = await build_chat_context(", fast_path)
     assert fast_path < context_build
     assert "and not tool_approval_continuation" in source[source.rfind("simple_fast_path = bool(", 0, fast_path):fast_path]
-    assert "agent_runs.start(\n                    session, _simple_response_stream(), request_id=client_request_id" in source
+    assert "agent_runs.start(" in source
+    assert "owner=effective_user(request)" in source
     assert "and not (_tool_intent and _tool_intent.needs_tools)" in source[source.rfind("simple_fast_path = bool(", 0, fast_path):fast_path]
     assert 'logger.info("agent→chat fast routing: low-effort conversational turn")' in source
     assert "and not _explicit_browser_intent" in source
@@ -272,7 +336,8 @@ def test_time_variations_select_deterministic_path_without_llm_or_planner(monkey
 
     source = (Path(__file__).resolve().parents[1] / "routes/chat_routes.py").read_text(encoding="utf-8")
     selected = source.index("if simple_fast_path:")
-    assert source.index("agent_runs.start(\n                    session, _simple_response_stream()", selected) < source.index("ctx = await build_chat_context(", selected)
+    assert source.index("agent_runs.start(", selected) < source.index("ctx = await build_chat_context(", selected)
+    assert "owner=effective_user(request)" in source[selected:]
     assert "fast_path_selected=true" in source
     assert "simple_intent_matched=%s route=chat_stream" in source
 

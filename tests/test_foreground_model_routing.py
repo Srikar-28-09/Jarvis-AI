@@ -1917,13 +1917,42 @@ async def test_nonstream_chat_does_not_treat_empty_response_as_unavailability(mo
     monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
     endpoint, _saved = _chat_endpoint(monkeypatch)
 
-    response = await endpoint(
-        _RouteRequest("chat"),
-        ChatRequest(message="Explain how this request routes to a model.", session="session-1"),
-    )
+    with pytest.raises(HTTPException) as error:
+        await endpoint(
+            _RouteRequest("chat"),
+            ChatRequest(message="Explain how this request routes to a model.", session="session-1"),
+        )
 
     assert calls == ["selected-model"]
-    assert response["model"] == "selected-model"
+    assert error.value.status_code == 502
+    assert error.value.detail == "The model returned no user-facing answer. Please try again."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["chat", "agent"])
+async def test_stream_without_a_user_facing_answer_reports_error_not_success(
+    monkeypatch,
+    mode,
+):
+    captured = {}
+    chunks = ["data: [DONE]\n\n"]
+    endpoint = _chat_stream_endpoint(
+        monkeypatch,
+        mode,
+        captured,
+        chat_chunks=chunks if mode == "chat" else None,
+        agent_chunks=chunks if mode == "agent" else None,
+        capture_completion=True,
+        message="Explain how this request routes to a model.",
+    )
+
+    response = await endpoint(_RouteRequest(mode))
+    emitted = [chunk async for chunk in response.body_iterator]
+
+    assert any(chunk.startswith("event: error") for chunk in emitted)
+    assert any("no user-facing answer" in chunk for chunk in emitted)
+    assert not captured.get("saved")
+    assert not captured.get("post_processed")
 
 
 @pytest.mark.asyncio
@@ -3092,7 +3121,7 @@ def test_direct_low_signal_empty_completion_surfaces_without_fake_success(monkey
     assert not any('"type": "metrics"' in chunk for chunk in chunks)
 
 
-def test_reasoning_only_agent_error_emits_terminal_history(monkeypatch):
+def test_reasoning_only_agent_error_omits_reasoning_from_terminal_metadata(monkeypatch):
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *args, **kwargs: 10)
@@ -3116,7 +3145,8 @@ def test_reasoning_only_agent_error_emits_terminal_history(monkeypatch):
     terminal = json.loads(next(
         chunk for chunk in chunks if '"type": "agent_terminal"' in chunk
     )[6:])["data"]
-    assert terminal["thinking"] == "private reasoning partial"
+    assert "thinking" not in terminal
+    assert "private reasoning partial" not in json.dumps(terminal)
     assert terminal["round_texts"] == [
         "[Agent stopped: Model request failed (HTTP 504)]"
     ]

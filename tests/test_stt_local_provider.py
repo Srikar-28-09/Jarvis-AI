@@ -14,7 +14,7 @@ from starlette.datastructures import UploadFile
 
 from routes.stt_routes import setup_stt_routes
 from services.stt import stt_service as stt_module
-from services.stt.stt_service import STTInputError, STTService
+from services.stt.stt_service import STTInputError, STTProviderError, STTService
 
 
 def _wav_fixture():
@@ -165,3 +165,42 @@ def test_route_reports_readiness_and_rejects_invalid_audio():
     with pytest.raises(HTTPException) as invalid:
         asyncio.run(route2.endpoint(file=UploadFile(filename="audio.bin", file=io.BytesIO(b"bad"))))
     assert invalid.value.status_code == 400
+
+
+def test_route_runs_transcription_off_the_event_loop_thread():
+    main_thread = threading.get_ident()
+
+    class ThreadRecordingService:
+        available = True
+        unavailable_reason = ""
+
+        def transcribe(self, _audio):
+            self.thread_id = threading.get_ident()
+            return "recognized words"
+
+    service = ThreadRecordingService()
+    routes = setup_stt_routes(service)
+    route = next(route for route in routes.routes if route.path == "/api/stt/transcribe")
+    response = asyncio.run(route.endpoint(
+        file=UploadFile(filename="audio.webm", file=io.BytesIO(b"\x1aE\xdf\xa3webm"))
+    ))
+    assert response == {"text": "recognized words"}
+    assert service.thread_id != main_thread
+
+
+def test_route_reports_remote_stt_failure_separately_from_no_speech():
+    class ProviderFailureService:
+        available = True
+        unavailable_reason = ""
+
+        def transcribe(self, _audio):
+            raise STTProviderError("Could not reach the configured speech-to-text endpoint.")
+
+    routes = setup_stt_routes(ProviderFailureService())
+    route = next(route for route in routes.routes if route.path == "/api/stt/transcribe")
+    with pytest.raises(HTTPException) as failure:
+        asyncio.run(route.endpoint(
+            file=UploadFile(filename="audio.webm", file=io.BytesIO(b"\x1aE\xdf\xa3webm"))
+        ))
+    assert failure.value.status_code == 502
+    assert "Could not reach" in failure.value.detail["message"]

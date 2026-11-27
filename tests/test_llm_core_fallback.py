@@ -157,10 +157,9 @@ def test_usage_then_done_primary_invokes_fallback_and_discards_usage(monkeypatch
     "output_chunk",
     [
         'data: {"delta": "visible text"}\n\n',
-        'data: {"delta": "reasoning", "thinking": true}\n\n',
     ],
 )
-def test_text_or_reasoning_output_prevents_fallback(monkeypatch, output_chunk):
+def test_visible_text_prevents_fallback(monkeypatch, output_chunk):
     calls = []
 
     def per_model(model):
@@ -171,6 +170,24 @@ def test_text_or_reasoning_output_prevents_fallback(monkeypatch, output_chunk):
     assert calls == ["primary"]
     assert output_chunk in chunks
     assert not any('"fallback"' in c for c in chunks)
+
+
+def test_reasoning_only_output_does_not_commit_candidate(monkeypatch):
+    calls = []
+
+    def per_model(model):
+        calls.append(model)
+        if model == "primary":
+            return [
+                'data: {"delta": "private reasoning", "thinking": true}\n\n',
+                "data: [DONE]\n\n",
+            ]
+        return ['data: {"delta": "public answer"}\n\n', "data: [DONE]\n\n"]
+
+    chunks = _run_fallback(monkeypatch, per_model)
+    assert calls == ["primary", "backup"]
+    assert any('"fallback"' in chunk for chunk in chunks)
+    assert any('"delta": "public answer"' in chunk for chunk in chunks)
 
 
 def test_foreground_whitespace_only_delta_surfaces_empty_response_without_fallback(monkeypatch):

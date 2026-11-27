@@ -109,49 +109,40 @@ test('prepares a 200K cumulative stream only at scheduled commit cadence', () =>
   assert.deepEqual(commits, [cumulative]);
 });
 
-test('ordinary answers and reasoning deltas do not request cumulative analysis', () => {
-  const startsReasoning = (text) => /^\s*thinking(?:\s+process)?\s*:/i.test(text);
-  const ordinaryGate = createThinkingAnalysisGate({ startsWithReasoningPrefix: startsReasoning });
+test('ordinary prose is preserved and only explicit thought markers request analysis', () => {
+  const ordinaryGate = createThinkingAnalysisGate();
   let ordinary = '';
   let ordinaryAnalyses = 0;
   for (let i = 0; i < 2000; i++) {
-    ordinary += i === 0 ? 'Here is the answer. ' : 'answer '.repeat(10);
+    ordinary += i === 0
+      ? 'Thinking Process: this is ordinary prose. The user asks for an explanation. '
+      : 'answer '.repeat(10);
     if (ordinaryGate.shouldAnalyze(ordinary)) ordinaryAnalyses += 1;
   }
   assert.equal(ordinaryAnalyses, 0);
 
-  const thinkingGate = createThinkingAnalysisGate({ startsWithReasoningPrefix: startsReasoning });
-  let thinking = 'Thin';
+  const thinkingGate = createThinkingAnalysisGate();
+  let thinking = '<thi';
   assert.equal(thinkingGate.shouldAnalyze(thinking), false);
-  thinking += 'king: inspect the problem';
+  thinking += 'nk>inspect the problem';
   assert.equal(thinkingGate.shouldAnalyze(thinking), true);
   for (let i = 0; i < 2000; i++) {
     thinking += ' reasoning'.repeat(10);
-    assert.equal(thinkingGate.shouldAnalyze(thinking, { isThinking: true, nonTagThinking: true }), false);
+    assert.equal(thinkingGate.shouldAnalyze(thinking), false);
   }
-  thinking += '\n\nHere is the answer';
-  assert.equal(thinkingGate.shouldAnalyze(thinking, { isThinking: true, nonTagThinking: true }), true);
+  thinking += '</think>\n\nHere is the answer';
+  assert.equal(thinkingGate.shouldAnalyze(thinking), true);
 
-  const whitespaceGate = createThinkingAnalysisGate({ startsWithReasoningPrefix: startsReasoning });
-  let whitespaceThinking = ' '.repeat(250);
-  assert.equal(whitespaceGate.shouldAnalyze(whitespaceThinking), false);
-  whitespaceThinking += 'Thinking: bounded probe';
-  assert.equal(whitespaceGate.shouldAnalyze(whitespaceThinking), true);
+  const untaggedGate = createThinkingAnalysisGate();
+  assert.equal(untaggedGate.shouldAnalyze(' '.repeat(250) + 'Thinking: untagged text'), false);
 });
 
-test('split namespaced closes and false-close deadlines request analysis', () => {
-  let clock = 100;
-  const gate = createThinkingAnalysisGate({ now: () => clock });
+test('split namespaced thinking markers request analysis', () => {
+  const gate = createThinkingAnalysisGate();
   let text = '<mm:think>x</mm:';
-  assert.equal(gate.shouldAnalyze(text, { isThinking: true }), true, 'fresh opening tag is analyzed');
+  assert.equal(gate.shouldAnalyze(text), true, 'fresh opening tag is analyzed');
   text += 'think>answer';
-  assert.equal(gate.shouldAnalyze(text, { isThinking: true }), true, 'split namespaced close is analyzed');
-
-  text += ' still waiting';
-  assert.equal(gate.shouldAnalyze(text, { isThinking: true, recheckAt: 500 }), false);
-  clock = 500;
-  text += ' next delta';
-  assert.equal(gate.shouldAnalyze(text, { isThinking: true, recheckAt: 500 }), true);
+  assert.equal(gate.shouldAnalyze(text), true, 'split namespaced close is analyzed');
 
   const attributedGate = createThinkingAnalysisGate();
   let attributed = `<think data-provider="${'x'.repeat(400)}"`;

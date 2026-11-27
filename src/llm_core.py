@@ -13,7 +13,7 @@ import math
 import ipaddress
 from contextlib import asynccontextmanager, contextmanager
 from fastapi import HTTPException
-from typing import Optional, Dict, List, Tuple
+from typing import Any, Optional, Dict, List, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from urllib.parse import urlparse
 
@@ -449,7 +449,9 @@ _host_health_lock = threading.Lock()
 _model_activity: Dict[str, float] = {}
 
 _HARMONY_MARKER_RE = re.compile(
-    r"<\|channel\|>(analysis|commentary|final)"
+    r"<\|channel\|>(?P<harmony_channel>analysis|commentary|final)"
+    r"|<\|channel>(?P<gemma_channel>thought|response)\s*\n?"
+    r"|<channel\|>"
     r"|<\|start\|>(?:assistant|system|user|tool)?"
     r"|<\|message\|>"
     r"|<\|end\|>"
@@ -460,6 +462,9 @@ _HARMONY_MARKERS = (
     "<|channel|>analysis",
     "<|channel|>commentary",
     "<|channel|>final",
+    "<|channel>thought",
+    "<|channel>response",
+    "<channel|>",
     "<|start|>assistant",
     "<|start|>system",
     "<|start|>user",
@@ -520,16 +525,20 @@ class _HarmonyStreamRouter:
             out.append((text, False))
             return
         if self._in_message:
-            # analysis + commentary (tool-call preambles / function-arg bodies)
-            # are internal, not user-facing — route them to thinking so they
-            # don't leak into the visible answer; only `final` is visible.
-            out.append((text, self._channel in ("analysis", "commentary")))
+            # analysis/commentary/thought channels are internal, not user-facing.
+            out.append((text, self._channel in ("analysis", "commentary", "thought")))
 
     def _handle_marker(self, match: re.Match[str]) -> None:
         marker = match.group(0)
         self._seen_harmony = True
         if marker.startswith("<|channel|>"):
-            self._channel = match.group(1)
+            self._channel = match.group("harmony_channel")
+            self._in_message = False
+        elif marker.startswith("<|channel>"):
+            self._channel = match.group("gemma_channel")
+            self._in_message = True
+        elif marker == "<channel|>":
+            self._channel = None
             self._in_message = False
         elif marker == "<|message|>":
             self._in_message = True
@@ -553,6 +562,95 @@ class _HarmonyStreamRouter:
         self._buf = "" if hold == 0 else self._buf[-hold:]
         self._append_text(out, emit)
         return out
+
+
+_THINK_OPEN_RE = re.compile(r"<(?:think(?:ing)?|thought)(?:\s+[^<>]*)?>", re.IGNORECASE)
+_THINK_CLOSE_RE = re.compile(r"</(?:think(?:ing)?|thought)\s*>", re.IGNORECASE)
+_THINK_MARKER_PREFIXES = (
+    "<think", "<thinking", "<thought", "</think", "</thinking", "</thought",
+)
+
+
+def _think_tag_suffix_hold_len(text: str) -> int:
+    for index in range(len(text)):
+        suffix = text[index:]
+        lowered = suffix.lower()
+        if any(marker.startswith(lowered) for marker in _THINK_MARKER_PREFIXES):
+            return len(suffix)
+        if re.fullmatch(r"</?(?:think(?:ing)?|thought)(?:\s[^<>]*)?", suffix, re.IGNORECASE):
+            return len(suffix)
+    return 0
+
+
+class _ThinkTagStreamRouter:
+    """Split explicit inline thought tags from answer text across stream chunks."""
+
+    def __init__(self, *, enabled: bool = False) -> None:
+        self._enabled = enabled
+        self._decided = enabled
+        self._in_thinking = False
+        self._buf = ""
+
+    def feed(self, text: str) -> List[Tuple[str, bool]]:
+        if text:
+            self._buf += text
+        if not self._decided:
+            prefix = self._buf.lstrip().lower()
+            if _THINK_OPEN_RE.match(self._buf.lstrip()) or _THINK_CLOSE_RE.match(self._buf.lstrip()):
+                self._enabled = True
+                self._decided = True
+            elif any(marker.startswith(prefix) for marker in _THINK_MARKER_PREFIXES) or re.fullmatch(
+                r"</?(?:think(?:ing)?|thought)(?:\s[^<>]*)?", self._buf.lstrip(), re.IGNORECASE
+            ):
+                return []
+            else:
+                self._decided = True
+                result = [(self._buf, False)] if self._buf else []
+                self._buf = ""
+                return result
+        return self._drain(final=False)
+
+    def flush(self) -> List[Tuple[str, bool]]:
+        if not self._decided:
+            self._decided = True
+            self._enabled = False
+        return self._drain(final=True)
+
+    def _drain(self, *, final: bool) -> List[Tuple[str, bool]]:
+        if not self._enabled:
+            if not self._buf:
+                return []
+            result = [(self._buf, False)]
+            self._buf = ""
+            return result
+
+        result: List[Tuple[str, bool]] = []
+        while self._buf:
+            marker_re = _THINK_CLOSE_RE if self._in_thinking else _THINK_OPEN_RE
+            marker = marker_re.search(self._buf)
+            if marker:
+                prefix = self._buf[:marker.start()]
+                if prefix:
+                    result.append((prefix, self._in_thinking))
+                self._in_thinking = not self._in_thinking if marker_re is _THINK_CLOSE_RE else True
+                self._buf = self._buf[marker.end():]
+                continue
+            if not self._in_thinking:
+                stray_close = _THINK_CLOSE_RE.search(self._buf)
+                if stray_close:
+                    prefix = self._buf[:stray_close.start()]
+                    if prefix:
+                        result.append((prefix, False))
+                    self._buf = self._buf[stray_close.end():]
+                    continue
+            hold = 0 if final else _think_tag_suffix_hold_len(self._buf)
+            emitted = self._buf if hold == 0 else self._buf[:-hold]
+            self._buf = "" if hold == 0 else self._buf[-hold:]
+            if emitted:
+                result.append((emitted, self._in_thinking))
+            if not final:
+                break
+        return result
 
 
 def _stream_delta_event(text: str, *, thinking: bool = False) -> str:
@@ -1774,6 +1872,54 @@ def _normalize_mistral_content(content):
     return "".join(text_parts), "".join(thinking_parts)
 
 
+def _public_response_text(content: Any) -> str:
+    """Extract user-facing text from explicitly structured model output."""
+    if not isinstance(content, str) or not content:
+        return ""
+    from src.text_helpers import normalize_thinking_markup
+
+    text = _strip_visible_chat_template_artifacts(normalize_thinking_markup(content))
+    harmony = _HarmonyStreamRouter()
+    harmony_parts = harmony.feed(text) + harmony.flush()
+    visible_parts: List[str] = []
+    for part, is_thinking in harmony_parts:
+        if is_thinking:
+            continue
+        thought_tags = _ThinkTagStreamRouter(enabled=True)
+        visible_parts.extend(
+            piece
+            for piece, private in thought_tags.feed(part) + thought_tags.flush()
+            if not private
+        )
+    return "".join(visible_parts).strip()
+
+
+def _public_response_from_message(message: Dict[str, Any]) -> str:
+    content = message.get("content")
+    structured_thinking = False
+    if isinstance(content, list):
+        content, thinking = _normalize_mistral_content(content)
+        structured_thinking = bool(thinking)
+    elif isinstance(content, str):
+        structured_thinking = bool(re.search(
+            r"<(?:think(?:ing)?|thought)\b|<\|channel\|>(?:analysis|commentary)|<\|channel>thought",
+            content,
+            re.IGNORECASE,
+        ))
+    response = _public_response_text(content)
+    if response:
+        return response
+    has_reasoning = bool(
+        message.get("reasoning_content")
+        or message.get("reasoning")
+        or message.get("thinking")
+        or structured_thinking
+    )
+    if has_reasoning and not message.get("tool_calls"):
+        raise _FallbackIneligibleHTTPException(502, "The model returned no final answer.")
+    return ""
+
+
 def _convert_openai_content_to_anthropic(content):
     """Convert OpenAI multimodal content blocks to Anthropic format.
 
@@ -2346,18 +2492,11 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
             response = _parse_ollama_response(data)
         else:
             msg = data["choices"][0]["message"]
-            content = msg.get("content")
-            if isinstance(content, list):
-                # Mistral structured content — extract thinking + text
-                text_part, thinking_part = _normalize_mistral_content(content)
-                if thinking_part:
-                    response = thinking_part + "\n\n" + (text_part or "")
-                else:
-                    response = text_part or msg.get("reasoning_content") or ""
-            else:
-                response = content or msg.get("reasoning_content") or ""
+            response = _public_response_from_message(msg)
         _set_cached_response(cache_key, response)
         return response
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(502, f"Unexpected schema from {target_url}: {str(data)[:400]}")
 
@@ -2749,17 +2888,7 @@ async def llm_call_async(
                     response = _parse_ollama_response(data)
                 else:
                     msg = data["choices"][0]["message"]
-                    content = msg.get("content")
-                    if isinstance(content, list):
-                        # Mistral structured content — extract thinking + text
-                        # (same contract as llm_call / stream_llm; see #5435).
-                        text_part, thinking_part = _normalize_mistral_content(content)
-                        if thinking_part:
-                            response = thinking_part + "\n\n" + (text_part or "")
-                        else:
-                            response = text_part or msg.get("reasoning_content") or ""
-                    else:
-                        response = content or msg.get("reasoning_content") or ""
+                    response = _public_response_from_message(msg)
                 _set_cached_response(
                     cache_key,
                     response,
@@ -3477,12 +3606,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     # Accumulate native tool_calls across streaming chunks
     _tc_acc: Dict[int, Dict] = {}  # index -> {id, name, arguments}
     _tc_last_idx = [-1]  # most-recently-touched slot, for providers that omit `index`
-    # For thinking models: prepend <think> to first content delta so frontend
-    # can detect thinking-in-progress (some models output </think> but no <think>)
-    _thinking_model = _supports_thinking(model)
-    _first_content_sent = False
-    _in_think_tag = False        # True while consuming <think>…</think> content
-    _think_open_stripped = False  # opening <think> tag already removed
+    _think_router = _ThinkTagStreamRouter(enabled=_supports_thinking(model))
     _harmony_router = _HarmonyStreamRouter()
     _harmony_active = False       # sticky: gpt-oss harmony <|channel|> stream detected
     _actual_model = ""
@@ -3499,19 +3623,14 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
 
     def _format_routed_content(parts: List[Tuple[str, bool]]) -> List[str]:
-        nonlocal _first_content_sent
         events = []
         for part, is_thinking in parts:
             if is_thinking:
                 events.append(_stream_delta_event(part, thinking=True))
                 continue
-            # Some thinking backends start normal content with a stray closing
-            # tag. Repair only that shape; do not wrap every first token for
-            # model families like MiniMax, which often stream ordinary answers.
-            if _thinking_model and not _first_content_sent and part.lstrip().lower().startswith("</think"):
-                part = "<think>" + part
-            _first_content_sent = True
-            events.append(_stream_delta_event(part))
+            for text, private in _think_router.feed(part):
+                if text:
+                    events.append(_stream_delta_event(text, thinking=private))
         return events
 
     try:
@@ -3651,6 +3770,18 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                         if content:
                                             if isinstance(content, str):
                                                 _stream_answer_chars += len(content)
+                                            content = re.sub(
+                                                r"<mm:think(\s+[^>]*)?>",
+                                                r"<think\1>",
+                                                content,
+                                                flags=re.IGNORECASE,
+                                            )
+                                            content = re.sub(
+                                                r"</mm:think>",
+                                                "</think>",
+                                                content,
+                                                flags=re.IGNORECASE,
+                                            )
                                             content = _strip_visible_chat_template_artifacts(content)
                                             if not content:
                                                 continue
@@ -3658,63 +3789,16 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                             if _degenerate:
                                                 yield _degenerate
                                                 return
-                                            content = re.sub(r"<mm:think(\s+[^>]*)?>", r"<think\1>", content, flags=re.IGNORECASE)
-                                            content = re.sub(r"</mm:think>", "</think>", content, flags=re.IGNORECASE)
-                                            stripped = content.lstrip()
                                             # gpt-oss harmony format (<|channel|>analysis/final): route via the harmony
-                                            # stream router. Sticky once the first marker appears — distinct from the
-                                            # <think> path below (handled in the else, preserving #2588 behaviour).
+                                            # stream router. Explicit thought tags use the same structured
+                                            # routing contract through _ThinkTagStreamRouter.
                                             if _harmony_active or "<|" in content:
                                                 _harmony_active = True
                                                 for event in _format_routed_content(_harmony_router.feed(content)):
                                                     yield event
                                             else:
-                                                # Auto-detect <think>…</think> in content stream.
-                                                # Covers Qwen3-derived models (Qwopus, QwQ forks) whose
-                                                # names don't match _THINKING_MODEL_PATTERNS but still
-                                                # emit literal <think> markup via llama.cpp --jinja.
-                                                if not _first_content_sent and not _thinking_model and not _in_think_tag and stripped.lower().startswith("<think"):
-                                                    _thinking_model = True
-                                                    _in_think_tag = True
-                                                if _in_think_tag:
-                                                    close_idx = content.lower().find("</think>")
-                                                    if close_idx != -1:
-                                                        # Split: up-to-</think> → thinking, remainder → content
-                                                        think_part = content[:close_idx]
-                                                        if not _think_open_stripped:
-                                                            # Strip the opening <think[...] > from the first chunk.
-                                                            # Use a dedicated flag — _first_content_sent stays False
-                                                            # throughout the think block, so it must not be reused.
-                                                            tag_end = think_part.lower().find(">")
-                                                            if tag_end != -1:
-                                                                think_part = think_part[tag_end + 1:]
-                                                            _think_open_stripped = True
-                                                        regular_part = content[close_idx + len("</think>"):]
-                                                        _in_think_tag = False
-                                                        if think_part:
-                                                            yield f'data: {json.dumps({"delta": think_part, "thinking": True})}\n\n'
-                                                        if regular_part:
-                                                            _first_content_sent = True
-                                                            yield f'data: {json.dumps({"delta": regular_part})}\n\n'
-                                                    else:
-                                                        # Still inside <think>: route to thinking channel
-                                                        if not _think_open_stripped:
-                                                            # Strip the opening <think[...] > tag (first chunk only)
-                                                            tag_end = stripped.lower().find(">")
-                                                            if tag_end != -1:
-                                                                content = stripped[tag_end + 1:]
-                                                            _think_open_stripped = True
-                                                        if content:
-                                                            yield f'data: {json.dumps({"delta": content, "thinking": True})}\n\n'
-                                                else:
-                                                    # Some thinking backends start normal content with a
-                                                    # stray closing tag. Repair only that shape; do not
-                                                    # wrap every first token for model families like
-                                                    # MiniMax, which often stream ordinary answers.
-                                                    if _thinking_model and not _first_content_sent and stripped.lower().startswith("</think"):
-                                                        content = "<think>" + content
-                                                    _first_content_sent = True
-                                                    yield f'data: {json.dumps({"delta": content})}\n\n'
+                                                for event in _format_routed_content([(content, False)]):
+                                                    yield event
                                         # Native tool calls — accumulate across chunks
                                         for tc in delta.get("tool_calls") or []:
                                             if tc is None:
@@ -3784,6 +3868,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             # End of stream (no explicit [DONE] received)
             for event in _format_routed_content(_harmony_router.flush()):
                 yield event
+            for text, private in _think_router.flush():
+                if text:
+                    yield _stream_delta_event(text, thinking=private)
             tc_event = _emit_tool_calls()
             if tc_event:
                 yield tc_event
@@ -4092,7 +4179,9 @@ async def stream_llm_with_fallback(candidates, messages, **kwargs):
                 delta = event_data.get("delta")
                 event_type = event_data.get("type")
                 substantive = (
-                    isinstance(delta, str) and bool(delta.strip())
+                    isinstance(delta, str)
+                    and bool(delta.strip())
+                    and event_data.get("thinking") is not True
                 ) or (
                     event_type == "tool_calls"
                     and bool(event_data.get("calls"))

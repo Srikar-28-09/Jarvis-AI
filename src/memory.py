@@ -218,6 +218,21 @@ class MemoryManager:
         if changed:
             self.save(entries)
             logger.info("Claimed %d ownerless memories for %s", claimed, owner)
+
+    def purge_owner(self, owner: str) -> int:
+        """Delete only entries belonging to an exact canonical owner."""
+        if not owner:
+            return 0
+        try:
+            entries = self.load_all_for_update()
+        except MemoryStoreUnreadable as e:
+            logger.error("Refusing account memory purge: %s", e)
+            return 0
+        remaining = [entry for entry in entries if str(entry.get("owner") or "").strip() != owner]
+        removed = len(entries) - len(remaining)
+        if removed:
+            self.save(remaining)
+        return removed
     
     def _validate_entries(self, entries: List[Dict]) -> List[Dict]:
         """Ensure all entries have required fields."""

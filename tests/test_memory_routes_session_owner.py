@@ -43,9 +43,11 @@ def _router(monkeypatch, caller):
 
 
 def _request(user):
+    auth_manager = MagicMock()
+    auth_manager.get_privileges.return_value = {"can_manage_memory": True}
     return SimpleNamespace(
         state=SimpleNamespace(current_user=user),
-        app=SimpleNamespace(state=SimpleNamespace(auth_manager=None)),
+        app=SimpleNamespace(state=SimpleNamespace(auth_manager=auth_manager)),
     )
 
 

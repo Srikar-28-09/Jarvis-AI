@@ -681,6 +681,49 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise
         if not ok:
             raise HTTPException(400, "Cannot delete user")
+        deleted_username = body.username.strip().lower()
+
+        # Account deletion is an explicit private-data lifecycle. Revoke
+        # in-memory execution state and remove owner-bearing SQL rows. Shared
+        # ownerless/global rows are not touched.
+        try:
+            from src import agent_runs, bg_jobs
+            agent_runs.retire_owner(deleted_username)
+            bg_jobs.cancel_owner(deleted_username)
+        except Exception as e:
+            logger.warning("Failed to revoke execution state for deleted user %s: %s", deleted_username, e)
+        try:
+            from src.tool_approvals import tool_approval_store
+            tool_approval_store.retire_for_owner(deleted_username)
+        except Exception as e:
+            logger.warning("Failed to retire approvals for deleted user %s: %s", deleted_username, e)
+        try:
+            memory_manager = getattr(request.app.state, "memory_manager", None)
+            purge_owner = getattr(memory_manager, "purge_owner", None)
+            if callable(purge_owner):
+                purge_owner(deleted_username)
+        except Exception as e:
+            logger.warning("Failed to purge memory for deleted user %s: %s", deleted_username, e)
+        try:
+            from sqlalchemy import func
+            from core.database import Base, SessionLocal
+            db = SessionLocal()
+            try:
+                for mapper in Base.registry.mappers:
+                    model = mapper.class_
+                    if not hasattr(model, "owner"):
+                        continue
+                    db.query(model).filter(
+                        func.lower(model.owner) == deleted_username
+                    ).delete(synchronize_session=False)
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning("Failed to purge owner-bearing SQL data for deleted user %s: %s", deleted_username, e)
         # delete_user removes the user's ApiToken rows, but the bearer-auth
         # middleware serves from an in-memory prefix->token cache that only
         # rebuilds when flagged dirty. Without this, a deleted user's already

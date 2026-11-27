@@ -118,6 +118,7 @@ def test_visible_image_endpoint_for_base_allows_shared_or_own(monkeypatch):
 
 def test_image_endpoint_owner_filter_is_noop_in_single_user_mode(monkeypatch):
     _patch_model(monkeypatch)
+    monkeypatch.setenv("AUTH_ENABLED", "false")
     rows = [_ep(URL, "bob")]
 
     ep = gallery_routes._visible_image_endpoint_for_base(_DB(rows), URL, None)

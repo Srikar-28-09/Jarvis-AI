@@ -22,6 +22,7 @@ from src.session_image_cleanup import _generated_image_path_for_cleanup, session
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
+from src.text_helpers import strip_think
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -82,7 +83,8 @@ def _message_text(message) -> str:
         content = message.get("content")
     else:
         content = getattr(message, "content", None)
-    return _content_to_text(content)
+    text = _content_to_text(content)
+    return strip_think(text, prose=False, prompt_echo=False) if _message_role(message) == "assistant" else text
 
 
 def _message_metadata(message) -> dict:
@@ -861,7 +863,17 @@ def setup_session_routes(
                 "name": session.name,
                 "model": session.model,
                 "exported": datetime.now().isoformat(),
-                "messages": [{"role": m.role, "content": m.content} for m in session.history],
+                "messages": [
+                    {
+                        "role": m.role,
+                        "content": (
+                            strip_think(m.content, prose=False, prompt_echo=False)
+                            if m.role == "assistant" and isinstance(m.content, str)
+                            else m.content
+                        ),
+                    }
+                    for m in session.history
+                ],
             }
             out_name = filename or f"conversation_{safe_name}_{timestamp}.json"
             return Response(
@@ -874,7 +886,7 @@ def setup_session_routes(
             lines = []
             for m in session.history:
                 lines.append(f"[{m.role.upper()}]")
-                lines.append(_content_to_text(m.content))
+                lines.append(_message_text(m))
                 lines.append("")
             out_name = filename or f"conversation_{safe_name}_{timestamp}.txt"
             return Response(
@@ -897,7 +909,7 @@ def setup_session_routes(
             ]
             for m in session.history:
                 cls = "user" if m.role == "user" else "ai"
-                content = _content_to_text(m.content).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                content = _message_text(m).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 content = content.replace("\n", "<br>")
                 html_parts.append(f'<div class="msg {cls}"><div class="role">{m.role}</div>{content}</div>')
             html_parts.append("</body></html>")
@@ -916,7 +928,7 @@ def setup_session_routes(
         markdown_lines.append("\n---\n")
         for message in session.history:
             role = message.role.upper()
-            content = _content_to_text(message.content)
+            content = _message_text(message)
             markdown_lines.append(f"### {role}")
             markdown_lines.append(f"{content}\n")
             markdown_lines.append("---\n")

@@ -158,9 +158,37 @@ def test_think_tag_gt_in_mid_reasoning_not_truncated(monkeypatch):
     assert any("answer" in d["delta"] for d in regular), regular
 
 
-def test_registered_thinking_model_stray_close_tag_repair_unchanged(monkeypatch):
-    # The existing </think> repair for registered models must not regress.
-    # A registered model that starts content with </think> gets <think> prepended.
+def test_think_tags_split_across_chunks_keep_reasoning_private_and_answer_visible(monkeypatch):
+    deltas = _run_stream(
+        "Qwopus3-custom",
+        [
+            'data: {"choices":[{"delta":{"content":"<thi"}}]}',
+            'data: {"choices":[{"delta":{"content":"nk>private "}}]}',
+            'data: {"choices":[{"delta":{"content":"thought</thi"}}]}',
+            'data: {"choices":[{"delta":{"content":"nk>Final answer."}}]}',
+            "data: [DONE]",
+        ],
+        monkeypatch,
+    )
+    assert "".join(d["delta"] for d in deltas if d.get("thinking")) == "private thought"
+    assert "".join(d["delta"] for d in deltas if not d.get("thinking")) == "Final answer."
+
+
+def test_gemma_thought_and_response_channels_are_routed_separately(monkeypatch):
+    deltas = _run_stream(
+        "gemma-4",
+        [
+            'data: {"choices":[{"delta":{"content":"<|channel>thought\\nprivate"}}]}',
+            'data: {"choices":[{"delta":{"content":" thoughts<channel|><|channel>response\\nAnswer<channel|>"}}]}',
+            "data: [DONE]",
+        ],
+        monkeypatch,
+    )
+    assert "".join(d["delta"] for d in deltas if d.get("thinking")) == "private thoughts"
+    assert "".join(d["delta"] for d in deltas if not d.get("thinking")) == "Answer"
+
+
+def test_registered_thinking_model_stray_close_tag_is_not_exposed(monkeypatch):
     deltas = _run_stream(
         "qwq-32b",  # registered in _THINKING_MODEL_PATTERNS
         [
@@ -169,9 +197,8 @@ def test_registered_thinking_model_stray_close_tag_repair_unchanged(monkeypatch)
         ],
         monkeypatch,
     )
-    assert deltas, deltas
-    first = deltas[0]["delta"]
-    assert first.startswith("<think>"), f"expected repair prefix, got: {first!r}"
+    assert "".join(d["delta"] for d in deltas if not d.get("thinking")) == "Here is my answer"
+    assert all("<think>" not in d["delta"] for d in deltas)
 
 
 def test_thinking_field_emits_thinking_chunk(monkeypatch):

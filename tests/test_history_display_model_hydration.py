@@ -284,6 +284,60 @@ def test_incomplete_cached_history_hydrates_once_for_model_context(monkeypatch):
     assert hidden_summary["metadata"]["hidden"] is True
 
 
+def test_model_context_hydration_orders_relationship_rows_by_timestamp(monkeypatch):
+    engine, db_factory = _database()
+    db = db_factory()
+    start = datetime(2026, 1, 1, 12, 0, 0)
+    try:
+        db.add(
+            DbSession(
+                id="session-ordered",
+                name="Ordered chat",
+                endpoint_url="http://model.test/v1",
+                model="test-model",
+                owner="alice",
+                message_count=3,
+            )
+        )
+        # Insert out of order: relationship iteration has no declared order.
+        db.add_all(
+            [
+                DbChatMessage(
+                    id="message-late",
+                    session_id="session-ordered",
+                    role="assistant",
+                    content="late",
+                    timestamp=start + timedelta(seconds=2),
+                ),
+                DbChatMessage(
+                    id="message-early",
+                    session_id="session-ordered",
+                    role="user",
+                    content="early",
+                    timestamp=start,
+                ),
+                DbChatMessage(
+                    id="message-middle",
+                    session_id="session-ordered",
+                    role="assistant",
+                    content="middle",
+                    timestamp=start + timedelta(seconds=1),
+                ),
+            ]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    manager = _manager(db_factory, monkeypatch)
+    try:
+        session = manager.get_session("session-ordered")
+    finally:
+        engine.dispose()
+
+    assert [message.content for message in session.history] == ["early", "middle", "late"]
+
+
 def test_inflated_message_count_column_does_not_reload_warm_sessions(monkeypatch):
     """A drifted-high sessions.message_count must not reload on every read.
 

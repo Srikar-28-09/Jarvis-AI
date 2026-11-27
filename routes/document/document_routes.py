@@ -1512,7 +1512,29 @@ def setup_document_routes(session_manager, upload_handler=None) -> APIRouter:
 
             upload_id = find_source_upload_id(doc.current_content or "")
             if not upload_id:
-                raise HTTPException(400, "Document is not linked to a source PDF")
+                output_path = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+                _to_unlink.append(output_path)
+                try:
+                    from src.pdf_runtime import write_text_document_pdf
+
+                    write_text_document_pdf(
+                        output_path,
+                        doc.title or "Document",
+                        doc.current_content or "",
+                    )
+                except RuntimeError as exc:
+                    _cleanup_temps()
+                    raise HTTPException(503, str(exc)) from exc
+                except Exception as exc:
+                    logger.exception("Could not export text document %s as PDF", doc_id)
+                    _cleanup_temps()
+                    raise HTTPException(500, "Document PDF export failed.") from exc
+                return FileResponse(
+                    output_path,
+                    media_type="application/pdf",
+                    filename=f"{_slug(doc.title or 'document')}.pdf",
+                    background=BackgroundTask(_cleanup_temps),
+                )
 
             pdf_path = _locate_current_user_upload(request, upload_id, user)
             if not pdf_path:

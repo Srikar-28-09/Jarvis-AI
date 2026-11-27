@@ -86,10 +86,10 @@ def test_returns_callers_own_endpoint(monkeypatch):
     assert ep is not None and ep.owner == "alice"
 
 
-def test_allows_legacy_null_owner_shared_row(monkeypatch):
+def test_rejects_legacy_null_owner_row(monkeypatch):
     rows = [_ep(URL, None)]
     ep = _resolve(monkeypatch, rows, URL, "alice")
-    assert ep is not None and ep.owner is None
+    assert ep is None
 
 
 def test_no_match_returns_none(monkeypatch):
@@ -98,7 +98,8 @@ def test_no_match_returns_none(monkeypatch):
 
 
 def test_null_owner_is_legacy_single_user_noop(monkeypatch):
-    # Single-user / unresolved owner: owner_filter no-op, exact URL match wins.
+    # Auth-disabled local mode: legacy exact URL matching remains compatible.
+    monkeypatch.setenv("AUTH_ENABLED", "false")
     rows = [_ep(URL, "bob")]
     ep = _resolve(monkeypatch, rows, URL, None)
     assert ep is not None and ep.owner == "bob"

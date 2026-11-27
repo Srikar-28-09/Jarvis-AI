@@ -10,11 +10,27 @@
  *   "endpoint:<id>"  — send recording to server /api/stt/transcribe (API)
  */
 
+import {
+  audioCaptureConstraints,
+  audioProcessingNotice,
+  readVoiceCaptureSettings,
+  SpeechEndpointing,
+} from './voice_capture.mjs';
+
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
 let recordingStartTime = null;
 let recordingInterval = null;
+let audioContext = null;
+let audioAnalyser = null;
+let audioFrame = null;
+let maxUtteranceTimeout = null;
+let endpointing = null;
+let captureHasVoice = false;
+let discardCurrentRecording = false;
+let recordingStopRequested = false;
+let recordingGeneration = 0;
 
 // Browser STT state
 let _recognition = null;
@@ -24,6 +40,7 @@ let _recordingStartPending = false;
 
 // Cached STT provider — refreshed on settings change
 let _sttProvider = 'disabled';
+let _sttLanguage = '';
 
 function logVoiceLifecycle(event, fields = {}) {
   try {
@@ -37,6 +54,81 @@ function logVoiceLifecycle(event, fields = {}) {
   } catch (_) {}
 }
 
+function stopAudioAnalysis() {
+  if (audioFrame !== null) cancelAnimationFrame(audioFrame);
+  audioFrame = null;
+  audioAnalyser = null;
+  endpointing = null;
+  if (audioContext) {
+    const context = audioContext;
+    audioContext = null;
+    void context.close().catch(error => console.warn('Could not close microphone audio processing:', error));
+  }
+}
+
+async function startAudioAnalysis(stream, showError, generation) {
+  let context;
+  try {
+    const Constructor = window.AudioContext || window.webkitAudioContext;
+    if (!Constructor) throw new Error('Web Audio is unavailable');
+    context = new Constructor();
+    audioContext = context;
+    if (context.state === 'suspended') await context.resume();
+    if (generation !== recordingGeneration || !isRecording) {
+      await context.close().catch(() => {});
+      if (audioContext === context) audioContext = null;
+      return;
+    }
+    const source = context.createMediaStreamSource(stream);
+    const highPass = context.createBiquadFilter();
+    highPass.type = 'highpass';
+    highPass.frequency.value = 80;
+    audioAnalyser = context.createAnalyser();
+    audioAnalyser.fftSize = 512;
+    source.connect(highPass);
+    highPass.connect(audioAnalyser);
+    endpointing = new SpeechEndpointing();
+    const samples = typeof audioAnalyser.getFloatTimeDomainData === 'function'
+      ? new Float32Array(audioAnalyser.fftSize)
+      : new Uint8Array(audioAnalyser.fftSize);
+    let lastFrame = performance.now();
+    const detect = () => {
+      if (!isRecording || !audioAnalyser || !endpointing) return;
+      const now = performance.now();
+      const delta = now - lastFrame;
+      lastFrame = now;
+      if (samples instanceof Float32Array) audioAnalyser.getFloatTimeDomainData(samples);
+      else audioAnalyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) {
+        const value = samples instanceof Float32Array ? sample : (sample - 128) / 128;
+        sum += value * value;
+      }
+      const state = endpointing.update(Math.sqrt(sum / samples.length), delta);
+      captureHasVoice = state.speechDetected;
+      if (state.finalized) {
+        stopRecording();
+        return;
+      }
+      audioFrame = requestAnimationFrame(detect);
+    };
+    audioFrame = requestAnimationFrame(detect);
+  } catch (error) {
+    if (audioContext === context) {
+      if (audioFrame !== null) cancelAnimationFrame(audioFrame);
+      audioFrame = null;
+      audioAnalyser = null;
+      endpointing = null;
+      audioContext = null;
+      if (context) void context.close().catch(closeError => console.warn('Could not close microphone audio processing:', closeError));
+    }
+    const message = 'Automatic silence detection is unavailable; use Stop recording to finish the utterance.';
+    console.warn(message, error);
+    if (showError) showError(message);
+    if (window._setVoiceStatus) window._setVoiceStatus('listening', message);
+  }
+}
+
 /**
  * Fetch current STT provider from server settings
  */
@@ -46,6 +138,7 @@ async function refreshSttProvider() {
     if (res.ok) {
       const stats = await res.json();
       _sttProvider = stats.provider || 'disabled';
+      _sttLanguage = stats.language || '';
       // Use built-in browser recognition as a no-configuration fallback when
       // server STT is disabled. This does not change the saved preference.
       if (_sttProvider === 'disabled' && (window.SpeechRecognition || window.webkitSpeechRecognition)) {
@@ -79,6 +172,11 @@ function _resetRecordingUI() {
   const wasActive = isRecording || _recordingStartPending;
   isRecording = false;
   _recordingStartPending = false;
+  recordingGeneration++;
+  recordingStopRequested = false;
+  if (maxUtteranceTimeout) clearTimeout(maxUtteranceTimeout);
+  maxUtteranceTimeout = null;
+  stopAudioAnalysis();
   if (window._setVoiceMicState) window._setVoiceMicState('idle');
   if (recordingInterval) {
     clearInterval(recordingInterval);
@@ -108,7 +206,7 @@ function startBrowserSTT() {
   const recognition = _recognition;
   recognition.continuous = true;
   recognition.interimResults = false;
-  recognition.lang = '';
+  recognition.lang = _sttLanguage;
 
   recognition.onresult = (event) => {
     for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -132,10 +230,17 @@ async function stopBrowserSTT() {
   const started = performance.now();
   const recognition = _recognition;
   if (_recognition) {
-    try { _recognition.stop(); } catch (e) { /* ignore */ }
+    try { _recognition.stop(); }
+    catch (error) { console.warn('Could not stop browser speech recognition cleanly:', error); }
     _recognition = null;
   }
-  await Promise.race([_browserRecognitionDone, new Promise(resolve => setTimeout(resolve, 1200))]);
+  let timeout;
+  const completed = await Promise.race([
+    _browserRecognitionDone.then(() => true),
+    new Promise(resolve => { timeout = setTimeout(() => resolve(false), 5000); }),
+  ]);
+  if (timeout) clearTimeout(timeout);
+  if (!completed) throw new Error('Speech recognition did not finish. Record the request again or use a configured local speech-to-text provider.');
   try {
     if (recognition && recognition._sttError) throw new Error(`Speech recognition failed: ${recognition._sttError}`);
     return _browserTranscript.trim();
@@ -194,30 +299,11 @@ function insertTranscription(text, showToast) {
   if (showToast) showToast('Transcribed');
 }
 
-function submitVoiceRequest() {
-  const input = document.getElementById('message');
-  const form = document.getElementById('chat-form');
-  if (!input || !form || !input.value.trim()) {
-    if (window._setVoiceStatus) window._setVoiceStatus('failed', 'No request was recognized.');
-    return;
-  }
-  if (window.__odysseusChatBusy === true) {
-    logVoiceLifecycle('voice_submission_blocked', { reason: 'chat_request_active', chat_busy: true });
-    if (window._setVoiceStatus) window._setVoiceStatus('failed', 'Wait for the current response to finish before sending this voice request.');
-    return;
-  }
-  if (window.__odysseusVoiceSubmitPending || window.__odysseusVoiceTurnPending) return;
+function markTranscriptReady(text, showToast) {
+  insertTranscription(text, showToast);
   window.__odysseusVoiceTurnPending = true;
-  if (!window.__odysseusVoiceRequestId) {
-    window.__odysseusVoiceRequestId = (crypto.randomUUID && crypto.randomUUID()) || `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }
-  if (window._setVoiceStatus) window._setVoiceStatus('thinking', 'Thinking…');
-  window.__odysseusVoiceSubmitPending = true;
-  logVoiceLifecycle('voice_transcript_submitted');
-  queueMicrotask(() => {
-    window.__odysseusVoiceSubmitPending = false;
-    if (window.__odysseusVoiceTurnPending && form.isConnected) form.requestSubmit();
-  });
+  window.__odysseusVoiceSubmitPending = false;
+  if (window._setVoiceStatus) window._setVoiceStatus('ready', 'Transcript ready. Review or correct it before sending. Voice is not speaker-verified.');
 }
 
 /**
@@ -238,6 +324,7 @@ export async function startRecording(onFileCreated, showToast, showError, option
   }
   window.__odysseusVoiceRequestId = (crypto.randomUUID && crypto.randomUUID()) || `voice-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   window.__odysseusVoiceExecutionId = '';
+  const generation = ++recordingGeneration;
   _recordingStartPending = true;
   logVoiceLifecycle('microphone_activation_allowed', { chat_busy: false });
   if (window._setVoiceStatus) window._setVoiceStatus('microphone', 'Microphone…');
@@ -270,6 +357,7 @@ export async function startRecording(onFileCreated, showToast, showError, option
   // an audio-file attachment.
   if (options.requireTranscription && _sttProvider === 'disabled') {
     await refreshSttProvider();
+    if (generation !== recordingGeneration) return;
     if (_sttProvider === 'disabled') {
       const message = (window.SpeechRecognition || window.webkitSpeechRecognition)
         ? 'Speech recognition is not configured. Enable an STT provider in Settings.'
@@ -283,8 +371,13 @@ export async function startRecording(onFileCreated, showToast, showError, option
 
   audioChunks = [];
 
-  navigator.mediaDevices.getUserMedia({ audio: true })
+  const captureSettings = readVoiceCaptureSettings();
+  navigator.mediaDevices.getUserMedia(audioCaptureConstraints(captureSettings.noiseSuppression))
     .then(stream => {
+      if (generation !== recordingGeneration) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       if (window.__odysseusChatBusy === true) {
         stream.getTracks().forEach(track => track.stop());
         logVoiceLifecycle('microphone_activation_blocked', {
@@ -312,10 +405,21 @@ export async function startRecording(onFileCreated, showToast, showError, option
         logVoiceLifecycle('voice_recording_stopped', { audio_chunks: audioChunks.length });
 
         try {
+        if (discardCurrentRecording) {
+          discardCurrentRecording = false;
+          if (_sttProvider === 'browser') await stopBrowserSTT();
+          if (window._setVoiceStatus) window._setVoiceStatus('failed', 'No speech was detected before the maximum recording duration.');
+          return;
+        }
         const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        if (audioBlob.size <= 1000) {
+          if (_sttProvider === 'browser') await stopBrowserSTT();
+          if (window._setVoiceStatus) window._setVoiceStatus('failed', 'No audio was captured. Check the microphone and try again.');
+          return;
+        }
         const provider = _sttProvider;
         logVoiceLifecycle('transcription_started', { provider });
-        if (window._setVoiceStatus) window._setVoiceStatus('thinking', 'Transcribing…');
+        if (window._setVoiceStatus) window._setVoiceStatus('transcribing', 'Transcribing…');
 
         if (provider === 'browser') {
           let transcript = '';
@@ -327,8 +431,7 @@ export async function startRecording(onFileCreated, showToast, showError, option
           }
           if (transcript) {
             logVoiceLifecycle('transcription_completed', { provider, transcript_chars: transcript.length });
-            insertTranscription(transcript, showToast);
-            submitVoiceRequest();
+            markTranscriptReady(transcript, showToast);
           } else {
             logVoiceLifecycle('transcription_completed', { provider, transcript_chars: 0 });
             if (showToast) showToast('No speech detected');
@@ -341,8 +444,7 @@ export async function startRecording(onFileCreated, showToast, showError, option
             const transcript = await transcribeOnServer(audioBlob);
             if (transcript) {
               logVoiceLifecycle('transcription_completed', { provider, transcript_chars: transcript.length });
-              insertTranscription(transcript, showToast);
-              submitVoiceRequest();
+              markTranscriptReady(transcript, showToast);
             } else {
               logVoiceLifecycle('transcription_completed', { provider, transcript_chars: 0 });
               if (showToast) showToast('No speech detected');
@@ -375,6 +477,16 @@ export async function startRecording(onFileCreated, showToast, showError, option
       if (window._setVoiceMicState) window._setVoiceMicState('recording');
       recordingStartTime = new Date();
       if (window._setVoiceStatus) window._setVoiceStatus('listening', 'Listening…');
+      const track = stream.getAudioTracks()[0];
+      const processingWarning = audioProcessingNotice(track?.getSettings?.(), captureSettings.noiseSuppression);
+      if (processingWarning && showError) showError(processingWarning);
+      captureHasVoice = false;
+      discardCurrentRecording = false;
+      recordingStopRequested = false;
+      void startAudioAnalysis(stream, showError, generation);
+      maxUtteranceTimeout = setTimeout(() => {
+        stopRecording({ discard: !captureHasVoice });
+      }, captureSettings.maxUtteranceMs);
 
       // Start browser STT if that's the provider
       if (_sttProvider === 'browser') {
@@ -413,11 +525,22 @@ export async function startRecording(onFileCreated, showToast, showError, option
 /**
  * Stop voice recording
  */
-export function stopRecording() {
+export function stopRecording({ discard = false } = {}) {
+  if (recordingStopRequested) return;
   if (mediaRecorder && mediaRecorder.state === 'recording') {
+    recordingStopRequested = true;
+    discardCurrentRecording = discard;
     logVoiceLifecycle('voice_recording_stop_requested');
-    mediaRecorder.stop();
+    try { mediaRecorder.stop(); }
+    catch (error) {
+      recordingStopRequested = false;
+      if (window._setVoiceStatus) window._setVoiceStatus('failed', `Could not stop microphone recording: ${error.message || error}`);
+      _resetRecordingUI();
+    }
     // isRecording will be set to false in _resetRecordingUI called from onstop
+  } else if (_recordingStartPending) {
+    recordingGeneration++;
+    _resetRecordingUI();
   } else {
     _resetRecordingUI();
   }

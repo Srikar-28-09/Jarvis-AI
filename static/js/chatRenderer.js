@@ -1104,17 +1104,13 @@ export function stripToolBlocks(text) {
 }
 
 /**
- * Plain-text payload for the message copy buttons: the reply as the renderer
- * displays it — tool blocks and <think> reasoning stripped. dataset.raw keeps
- * the full model output (chat.js even embeds the elapsed time into the
- * <think> tag for reload persistence), so copying it verbatim leaks the
- * thinking block (#3722). Falls back to the raw text when stripping leaves
- * nothing (e.g. turns interrupted mid-thinking).
+ * Plain-text payload for the message copy buttons. A reasoning-only response
+ * remains empty rather than falling back to private model output.
  */
 export function copyMessageText(msgElement) {
   const raw = msgElement.dataset.raw || msgElement.querySelector('.body')?.textContent || '';
   const { content } = markdownModule.extractThinkingBlocks(stripToolBlocks(raw));
-  return content || raw;
+  return content;
 }
 
 /**
@@ -2830,6 +2826,13 @@ export function addMessage(role, content, modelName, metadata) {
     let text = markdownModule.squashOutsideCode(stripToolBlocks(textRaw || ''));
     if (role === 'assistant') {
       text = resolveDocumentPlaceholderLinks(text, metadata);
+      const normalized = markdownModule.normalizeThinkingMarkup(text);
+      const hasLeadingUnclosedThinking = /^\s*<think(?:ing)?(?:\s+[^>]*)?>/i.test(normalized)
+        && markdownModule.hasUnclosedThinkTag(normalized)
+        && !/^\s*<think(?:ing)?(?:\s+[^>]*)?>[\s\S]*?<\/think(?:ing)?>/i.test(normalized);
+      text = hasLeadingUnclosedThinking
+        ? ''
+        : markdownModule.extractThinkingBlocks(normalized).content;
     }
 
     // For user messages, pull out vision-model image descriptions ([Image: name]\n
@@ -2873,16 +2876,7 @@ export function addMessage(role, content, modelName, metadata) {
     if (role === 'assistant' && metadata?.rag_sources?.length) {
       findingsSuffix += buildRagSourcesBox(metadata.rag_sources);
     }
-    // If thinking is stored in metadata (not in text), reconstruct the full display
-    if (role === 'assistant' && metadata?.thinking) {
-      const thinkTime = metadata.thinking_time || null;
-      const thinkHtml = markdownModule.processWithThinking(
-        '<think' + (thinkTime ? ` time="${thinkTime}"` : '') + '>' + metadata.thinking + '</think>\n\n' + text
-      );
-      b.innerHTML = sourcesPrefix + thinkHtml + findingsSuffix;
-	    } else {
-	      b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
-	    }
+    b.innerHTML = sourcesPrefix + markdownModule.processWithThinking(text) + findingsSuffix;
 	    b.dataset.raw = text;
 
     // The vision/OCR caption is stripped from the displayed text above (so the

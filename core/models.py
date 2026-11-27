@@ -14,6 +14,7 @@ from src.tool_approval_scopes import (
     CHAT_SESSION_APPROVAL_SIGNATURE_FIELD,
     verify_chat_session_grant,
 )
+from src.text_helpers import strip_think
 
 if TYPE_CHECKING:
     from .session_manager import SessionManager
@@ -84,9 +85,23 @@ class ChatMessage:
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for API responses."""
-        result = {"role": self.role, "content": self.content}
+        content = self.content
+        if self.role == "assistant" and isinstance(content, str):
+            content = strip_think(content, prose=False, prompt_echo=False)
+        result = {"role": self.role, "content": content}
         if self.metadata:
-            result["metadata"] = self.metadata
+            metadata = dict(self.metadata)
+            if self.role == "assistant":
+                metadata.pop("thinking", None)
+                metadata.pop("thinking_time", None)
+                if isinstance(metadata.get("round_texts"), list):
+                    metadata["round_texts"] = [
+                        strip_think(text, prose=False, prompt_echo=False)
+                        if isinstance(text, str)
+                        else text
+                        for text in metadata["round_texts"]
+                    ]
+            result["metadata"] = metadata
         return result
 
     def get(self, key: str, default=None):

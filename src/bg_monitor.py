@@ -105,6 +105,15 @@ async def _run_followup(rec: dict) -> bool:
         # don't retry forever.
         logger.info("bg-followup: session %s gone for job %s — skipping", rec.get("session_id"), rec.get("id"))
         return True
+    job_owner = str(rec.get("owner") or "").strip()
+    session_owner = str(getattr(sess, "owner", None) or "").strip()
+    if not job_owner or not session_owner or job_owner != session_owner:
+        logger.warning(
+            "bg-followup: refusing unresolved or mismatched owner for job %s",
+            rec.get("id"),
+        )
+        bg_jobs.mark_followup_uncertain(rec["id"])
+        return False
 
     # Don't write into a session that's mid-stream. The followup appends to
     # history + save_sessions(); a concurrent live turn does the same, and with
@@ -112,7 +121,7 @@ async def _run_followup(rec: dict) -> bool:
     # Defer — return False so we retry on the next tick once the turn finishes.
     try:
         from src import agent_runs
-        if agent_runs.is_active(sess.id):
+        if agent_runs.is_active(sess.id, owner=job_owner):
             logger.info("bg-followup: session %s busy (live turn) — deferring job %s", sess.id, rec.get("id"))
             return False
     except Exception:

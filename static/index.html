@@ -2384,6 +2384,17 @@
         <!-- ═══ SYSTEM TAB ═══ -->
         <div data-settings-panel="system" class="hidden">
 
+          <div class="admin-card" id="performance-dashboard">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+              <div>
+                <h2>Readiness &amp; Performance</h2>
+                <div class="admin-toggle-sub">Live service status, bounded recent timings, and measured free memory.</div>
+              </div>
+              <button type="button" class="admin-btn-sm" id="performance-refresh-btn">Refresh</button>
+            </div>
+            <div id="performance-report" class="admin-toggle-sub" aria-live="polite" style="margin-top:10px;white-space:pre-line;">Refresh to collect current diagnostics.</div>
+          </div>
+
           <div class="admin-card" id="settings-system-logs-card">
             <h2>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="settings-system-logs-svg">

@@ -2,12 +2,18 @@
 """STT API routes — multi-provider (local Whisper, API endpoint, browser)."""
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
+import asyncio
 import logging
 import time
 
 from src.upload_limits import read_upload_limited, STT_MAX_AUDIO_BYTES
 from src.request_timing import current_request_id, log_stage
-from services.stt.stt_service import STTInputError, STTTranscriptionError, STTUnavailableError
+from services.stt.stt_service import (
+    STTInputError,
+    STTProviderError,
+    STTTranscriptionError,
+    STTUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +51,7 @@ def setup_stt_routes(stt_service):
             if not audio_bytes:
                 raise HTTPException(status_code=400, detail={"message": "Empty audio file"})
 
-            text = stt_service.transcribe(audio_bytes)
+            text = await asyncio.to_thread(stt_service.transcribe, audio_bytes)
             if text is None or not text.strip():
                 raise HTTPException(
                     status_code=422,
@@ -63,6 +69,9 @@ def setup_stt_routes(stt_service):
         except STTUnavailableError as e:
             outcome = "error"
             raise HTTPException(status_code=503, detail={"message": str(e)}) from e
+        except STTProviderError as e:
+            outcome = "error"
+            raise HTTPException(status_code=502, detail={"message": str(e)}) from e
         except STTTranscriptionError as e:
             outcome = "error"
             raise HTTPException(status_code=422, detail={"message": str(e)}) from e

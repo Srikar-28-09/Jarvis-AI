@@ -1590,7 +1590,11 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         if decision not in {"approve", "deny"}:
             raise HTTPException(400, "Invalid tool approval decision.")
 
-        pending = tool_approval_store.peek(approval_id)
+        pending = tool_approval_store.peek(
+            approval_id,
+            owner=user,
+            session_id="",
+        )
         normalized_owner = str(user or "").strip().casefold()
         if (
             pending is None

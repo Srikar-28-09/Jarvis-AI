@@ -29,7 +29,8 @@ def test_composer_has_visible_standalone_microphone_control_wired_to_existing_re
     assert "voiceRecorderModule.startRecording(" in app
     assert "{ requireTranscription: true }" in app
     assert "voiceRecorderModule.init();" in app
-    assert "form.requestSubmit()" in recorder
+    assert "form.requestSubmit()" not in recorder
+    assert "Review or correct it before sending" in recorder
     assert "window.__odysseusVoiceRequestId" in recorder
 
 
@@ -44,11 +45,13 @@ def test_microphone_control_reports_unsupported_apis_and_permission_denial():
     assert "window._setVoiceStatus = (state, message" in app
 
 
-def test_voice_turn_transcribes_submits_and_reports_states():
+def test_voice_turn_transcribes_for_review_before_submission_and_reports_states():
     recorder = (ROOT / "static/js/voiceRecorder.js").read_text(encoding="utf-8")
     chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
-    assert "submitVoiceRequest();" in recorder
-    assert "form.requestSubmit()" in recorder
+    assert "markTranscriptReady(transcript, showToast)" in recorder
+    assert "window.__odysseusVoiceTurnPending = true" in recorder
+    assert "submitVoiceRequest();" not in recorder
+    assert "form.requestSubmit()" not in recorder
     assert "No speech was recognized." in recorder
     assert "Microphone permission denied." in recorder
     assert "X-Odysseus-Request-Id" in chat
@@ -113,15 +116,15 @@ def test_repeated_post_with_same_request_id_reuses_single_agent_run():
             executions.append(label)
             yield f"data: {label}\n\n"
 
-        first = agent_runs.start(session_id, stream("first"), request_id=request_id)
-        duplicate = agent_runs.start(session_id, stream("duplicate"), request_id=request_id)
+        first = agent_runs.start(session_id, stream("first"), request_id=request_id, owner="test-owner")
+        duplicate = agent_runs.start(session_id, stream("duplicate"), request_id=request_id, owner="test-owner")
         assert duplicate is first
-        events = [event async for event in agent_runs.subscribe(session_id, first)]
+        events = [event async for event in agent_runs.subscribe(session_id, first, owner="test-owner")]
         await first.task
         assert events == ["data: first\n\n"]
         assert executions == ["first"]
         assert first.request_id == request_id
-        new_request = agent_runs.start(session_id, stream("new-request"), request_id=request_id + "-new")
+        new_request = agent_runs.start(session_id, stream("new-request"), request_id=request_id + "-new", owner="test-owner")
         assert new_request is not first
         await new_request.task
         assert executions == ["first", "new-request"]

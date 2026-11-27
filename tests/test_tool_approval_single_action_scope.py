@@ -77,7 +77,7 @@ def test_deny_is_unaffected_by_the_single_action_flag():
         session_id=None,
         allow_continuation=False,
     ) is None
-    assert store.peek(pending.approval_id) is None
+    assert store.peek(pending.approval_id, owner="alice", session_id="") is None
 
 
 def test_skill_test_approval_route_opts_out_of_continuation():

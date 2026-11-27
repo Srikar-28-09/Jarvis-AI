@@ -13,7 +13,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 from fastapi import HTTPException, UploadFile
 
-from src.upload_limits import format_byte_limit, get_chat_upload_max_bytes
+from src.upload_limits import (
+    format_byte_limit,
+    get_chat_upload_max_bytes,
+    get_persistent_upload_quota_bytes,
+)
 
 
 def secure_filename(filename: str) -> str:
@@ -1241,6 +1245,21 @@ class UploadHandler:
                 status_code=400,
                 detail=f"File size exceeds {format_byte_limit(self.max_upload_size)} limit"
             )
+
+        persistent_quota = get_persistent_upload_quota_bytes()
+        if persistent_quota > 0 and owner:
+            used = 0
+            for info in (self._load_upload_index() or {}).values():
+                if str(info.get("owner") or "").strip() == str(owner).strip():
+                    try:
+                        used += max(0, int(info.get("size") or 0))
+                    except (TypeError, ValueError):
+                        continue
+            if used + file_size > persistent_quota:
+                raise HTTPException(
+                    status_code=413,
+                    detail="Per-user persistent upload storage limit reached",
+                )
         
         # Get original filename and sanitize it
         original_filename = u.filename or f"upload_{int(time.time())}"

@@ -240,11 +240,15 @@ def test_bearer_token_caller_cannot_pair(monkeypatch):
     assert exc.value.status_code == 403
 
 
-def test_non_admin_user_cannot_pair(monkeypatch):
+def test_ordinary_user_can_own_pairing(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
-    with pytest.raises(HTTPException) as exc:
-        require_admin(_req("bob", is_admin=False))
-    assert exc.value.status_code == 403
+    request = _fake_pair_request(format="json")
+    request.state.current_user = "bob"
+    request.state.api_token = False
+    monkeypatch.setattr(R, "require_user", lambda req: "bob")
+    monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate: ("tok-bob", "ody_bob"))
+    response = _pair_route("POST")(request)
+    assert response["token"] == "ody_bob"
 
 
 def test_admin_user_passes_the_gate(monkeypatch):
@@ -300,7 +304,7 @@ def test_pair_is_minted_via_post_not_get():
 
 
 def test_pair_page_uses_imported_admin_gate(monkeypatch):
-    monkeypatch.setattr(R, "require_admin", lambda request: None)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice")
     response = _pair_route("GET")(SimpleNamespace())
 
     assert "Pair a device" in str(getattr(response, "body", response))
@@ -308,7 +312,7 @@ def test_pair_page_uses_imported_admin_gate(monkeypatch):
 
 def test_pair_get_renders_form_without_minting(monkeypatch):
     mint = MagicMock(side_effect=AssertionError("GET must not mint a token"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice", raising=False)
     monkeypatch.setattr(R, "mint_pairing_token", mint)
 
     response = _pair_route("GET")(_fake_pair_request())
@@ -322,7 +326,7 @@ def test_pair_get_renders_form_without_minting(monkeypatch):
 
 def test_pair_post_json_returns_pairing_payload(monkeypatch):
     mint = MagicMock(return_value=("tok123", "ody_raw"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice", raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", mint)
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["192.168.1.50"])
@@ -359,7 +363,7 @@ def test_pair_post_json_prefers_configured_origin(monkeypatch):
     monkeypatch.setenv("COMPANION_BASE_URL", "http://odysseus.local:7000")
     mint = MagicMock(return_value=("tok123", "ody_raw"))
     discovery = MagicMock(side_effect=AssertionError("configured origin must skip LAN discovery"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice", raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", mint)
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", discovery)
@@ -396,7 +400,7 @@ def test_pair_post_rejects_invalid_config_before_mint_without_echoing_it(monkeyp
         f"http://admin:{configured_secret}@odysseus.local",
     )
     mint = MagicMock(side_effect=AssertionError("invalid config must not mint a token"))
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice", raising=False)
     monkeypatch.setattr(R, "mint_pairing_token", mint)
 
     with pytest.raises(HTTPException) as exc:
@@ -409,7 +413,7 @@ def test_pair_post_rejects_invalid_config_before_mint_without_echoing_it(monkeyp
 
 
 def test_pair_post_json_qr_failure_returns_null_qr(monkeypatch):
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice", raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate: ("tok123", "ody_raw"))
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["192.168.1.50"])
@@ -430,7 +434,7 @@ def test_pair_post_json_qr_failure_returns_null_qr(monkeypatch):
 
 
 def test_pair_post_html_escapes_pairing_values(monkeypatch):
-    monkeypatch.setattr(R, "require_admin", lambda request: None, raising=False)
+    monkeypatch.setattr(R, "require_user", lambda request: "alice", raising=False)
     monkeypatch.setattr(R, "get_current_user", lambda request: "alice")
     monkeypatch.setattr(R, "mint_pairing_token", lambda owner, invalidate: ("tok<123>", "ody_<raw>&"))
     monkeypatch.setattr(R._pairing, "lan_ip_candidates", lambda: ["host<one>&"])

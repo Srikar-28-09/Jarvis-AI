@@ -12,7 +12,8 @@ that persisted only native tool_calls. The txt/html/md exporters in
 ``_content_to_text`` coerces all three shapes to plain text so export degrades
 gracefully instead of returning a 500.
 """
-from routes.session_routes import _content_to_text
+from routes.session_routes import _content_to_text, _message_text
+from core.models import ChatMessage
 
 
 def test_plain_string_passes_through_unchanged():
@@ -48,3 +49,11 @@ def test_coerced_output_survives_the_export_operations():
     # html export path
     for t in texts:
         assert isinstance(t.replace("&", "&amp;"), str)
+
+
+def test_assistant_export_text_omits_legacy_reasoning():
+    message = ChatMessage(
+        "assistant",
+        "<think>private planning</think>Here is the answer.",
+    )
+    assert _message_text(message) == "Here is the answer."

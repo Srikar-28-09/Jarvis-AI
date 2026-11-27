@@ -34,6 +34,10 @@ class STTTranscriptionError(RuntimeError):
     """A configured provider failed to decode or transcribe valid audio."""
 
 
+class STTProviderError(RuntimeError):
+    """A configured remote STT endpoint failed or returned an invalid response."""
+
+
 def audio_file_details(audio_bytes: bytes) -> tuple[str, str]:
     """Identify supported RIFF/WAVE PCM or WebM uploads by content."""
     if len(audio_bytes) >= 12 and audio_bytes[:4] == b"RIFF" and audio_bytes[8:12] == b"WAVE":
@@ -200,8 +204,7 @@ class STTService:
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == endpoint_id).first()
             if not ep:
-                logger.error("STT endpoint %s not found", endpoint_id)
-                return None
+                raise STTUnavailableError("The configured speech-to-text endpoint no longer exists.")
             base_url = ep.base_url.rstrip("/")
             api_key = ep.api_key
         finally:
@@ -217,10 +220,21 @@ class STTService:
         try:
             response = httpx.post(url, headers=headers, files=files, data=data, timeout=60)
             response.raise_for_status()
-            return response.json().get("text", "")
-        except Exception as exc:
-            logger.error("API STT transcription failed: %s", exc)
-            return None
+        except httpx.HTTPStatusError as exc:
+            logger.error("API STT endpoint returned HTTP %s", exc.response.status_code)
+            raise STTProviderError(
+                f"The configured speech-to-text endpoint returned HTTP {exc.response.status_code}."
+            ) from exc
+        except httpx.RequestError as exc:
+            logger.error("Could not reach configured API STT endpoint: %s", type(exc).__name__)
+            raise STTProviderError("Could not reach the configured speech-to-text endpoint.") from exc
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise STTProviderError("The configured speech-to-text endpoint returned invalid JSON.") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+            raise STTProviderError("The configured speech-to-text endpoint returned an invalid response.")
+        return result["text"]
 
     def transcribe(self, audio_bytes: bytes) -> Optional[str]:
         settings = self._load_settings()

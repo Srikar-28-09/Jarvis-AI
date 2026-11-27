@@ -243,6 +243,35 @@ class TestGetContextLength:
         assert second == 200000
         assert len(calls) == 1
 
+    def test_local_ollama_uses_model_reported_context_below_family_default(self, monkeypatch):
+        requests = []
+
+        def fake_get(url, *args, **kwargs):
+            assert url.endswith("/slots")
+            return _FakeResp([])
+
+        def fake_post(url, *, json, **kwargs):
+            requests.append((url, json))
+            return _FakeResp({
+                "model_info": {
+                    "qwen3.context_length": 40960,
+                    "qwen3.block_count": 36,
+                }
+            })
+
+        monkeypatch.setattr(model_context.httpx, "get", fake_get)
+        monkeypatch.setattr(model_context.httpx, "post", fake_post)
+
+        context_length = model_context.get_context_length(
+            "http://localhost:11434",
+            "qwen3:8b",
+        )
+
+        assert context_length == 40960
+        assert requests == [
+            ("http://localhost:11434/api/show", {"model": "qwen3:8b"})
+        ]
+
     def _proxy_db(self, monkeypatch):
         _install_endpoint_db(monkeypatch, [
             types.SimpleNamespace(

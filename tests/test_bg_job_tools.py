@@ -29,7 +29,7 @@ def store(tmp_path, monkeypatch):
 
 def _seed(session_id="sess-a", status="running", job_id="job0001", output="", pid=4321):
     rec = {
-        "id": job_id, "session_id": session_id, "command": "sleep 60",
+        "id": job_id, "session_id": session_id, "owner": "test-owner", "command": "sleep 60",
         "status": status, "pid": pid, "started_at": time.time(),
         "ended_at": None if status == "running" else time.time(),
         "exit_code": None if status == "running" else 0,
@@ -46,14 +46,14 @@ def _seed(session_id="sess-a", status="running", job_id="job0001", output="", pi
 
 
 def _run(args, session_id="sess-a"):
-    return asyncio.run(ManageBgJobsTool().execute(json.dumps(args), {"session_id": session_id, "owner": None}))
+    return asyncio.run(ManageBgJobsTool().execute(json.dumps(args), {"session_id": session_id, "owner": "test-owner"}))
 
 
 # ── bg_jobs.kill ────────────────────────────────────────────────────────────
 
 def test_kill_marks_killed_and_suppresses_followup(store):
     _seed(job_id="job0001", pid=4321)
-    rec = bg_jobs.kill("job0001")
+    rec = bg_jobs.kill("job0001", owner="test-owner")
     assert rec["status"] == "failed"
     assert rec["killed"] is True
     assert rec["exit_code"] == -1
@@ -63,20 +63,20 @@ def test_kill_marks_killed_and_suppresses_followup(store):
 
 
 def test_kill_unknown_job_returns_none(store):
-    assert bg_jobs.kill("nope") is None
+    assert bg_jobs.kill("nope", owner="test-owner") is None
 
 
 def test_kill_finished_job_is_noop(store):
     _seed(job_id="done01", status="done")
-    rec = bg_jobs.kill("done01")
+    rec = bg_jobs.kill("done01", owner="test-owner")
     assert rec["status"] == "done"
     assert store["killed"] == []  # no signal sent to an already-finished job
 
 
 def test_result_text_reports_killed(store):
     rec = _seed(job_id="job0001")
-    bg_jobs.kill("job0001")
-    assert "killed" in bg_jobs.result_text(bg_jobs.get("job0001")).lower()
+    bg_jobs.kill("job0001", owner="test-owner")
+    assert "killed" in bg_jobs.result_text(bg_jobs.get("job0001", owner="test-owner")).lower()
 
 
 # ── manage_bg_jobs tool ─────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ def test_kill_via_tool(store):
     out = _run({"action": "kill", "job_id": "job0001"})
     assert "Killed" in out["output"]
     assert store["killed"] == [999]
-    assert bg_jobs.get("job0001")["killed"] is True
+    assert bg_jobs.get("job0001", owner="test-owner")["killed"] is True
 
 
 def test_kill_cross_session_denied(store):

@@ -180,7 +180,7 @@ def test_challenge_expiry_fails_closed(tmp_path, monkeypatch):
         False,
         "challenge_expired",
     )
-    assert store.peek(pending.approval_id) is not None
+    assert store.peek(pending.approval_id, owner="alice", session_id="session-1") is not None
 
 
 @pytest.mark.asyncio
@@ -453,4 +453,4 @@ def test_twilio_voice_callback_cannot_consume_approval(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert store.peek(pending.approval_id) is not None
+    assert store.peek(pending.approval_id, owner="alice", session_id="session-1") is not None

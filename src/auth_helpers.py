@@ -174,26 +174,37 @@ def require_privilege(request: Request, key: str) -> str:
         return user
     auth_mgr = getattr(request.app.state, "auth_manager", None)
     if auth_mgr is None:
-        return user
+        if _auth_disabled():
+            return user
+        raise HTTPException(403, "Privilege verification unavailable")
     try:
         privs = auth_mgr.get_privileges(user) or {}
     except Exception:
-        return user
+        raise HTTPException(403, "Could not verify account privileges")
     if not isinstance(privs, dict):
-        privs = {}
-    # True = permitted; missing key defaults to permitted (unknown privileges
-    # fail open — the UI gates display-side).
-    if not privs.get(key, True):
+        raise HTTPException(403, "Could not verify account privileges")
+    from core.auth import DEFAULT_PRIVILEGES
+    if key not in DEFAULT_PRIVILEGES:
+        raise HTTPException(403, "Unknown account privilege")
+    if key not in privs:
+        raise HTTPException(403, f"Account privilege {key} is not defined")
+    if privs[key] is not True:
         raise HTTPException(403, f"Your account is not allowed to {key.replace('_', ' ')}.")
     return user
 
 
-def owner_filter(query, model_cls, user: str, *, include_shared: bool = True):
-    """Filter `query` so only rows owned by `user` (and optionally null-owner
-    'shared' rows) come through. No-op when `user` is empty (single-user
-    mode). Returns the modified query."""
+def owner_filter(query, model_cls, user: str, *, include_shared: bool = False):
+    """Filter `query` to a canonical owner.
+
+    Missing owners are never shared unless `include_shared` is explicitly set
+    by a resource that has a documented shared-resource contract. Empty users
+    are rejected in authenticated mode and are a no-op only in auth-disabled
+    single-user mode.
+    """
     if not user:
-        return query
+        if auth_disabled():
+            return query
+        return query.filter(False)
     if include_shared:
         return query.filter((model_cls.owner == user) | (model_cls.owner == None))  # noqa: E711
     return query.filter(model_cls.owner == user)

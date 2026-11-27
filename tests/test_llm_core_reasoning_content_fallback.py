@@ -1,7 +1,7 @@
-"""Regression tests for reasoning_content fallback in non-streaming paths.
+"""Regression tests that keep provider reasoning out of non-streaming answers.
 
-Covers the five cases requested during PR review:
-  1. llm_call (sync): content="" + reasoning_content="..." → returns reasoning text
+Coverage:
+  1. llm_call (sync): reasoning-only response fails instead of returning reasoning
   2. llm_call_async (async): same
   3. Normal content wins over reasoning_content when both present
   4. Streaming agent path: reasoning-only round does NOT emit the generic error
@@ -12,6 +12,7 @@ import json
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from src import llm_core
 
@@ -33,26 +34,26 @@ def _openai_msg(content, reasoning_content=None):
 
 
 # ---------------------------------------------------------------------------
-# 1. llm_call (sync): empty content → falls back to reasoning_content
+# 1. llm_call (sync): reasoning-only response is not a user-facing answer
 # ---------------------------------------------------------------------------
 
-def test_llm_call_returns_reasoning_content_when_content_empty(monkeypatch):
+def test_llm_call_rejects_reasoning_only_response(monkeypatch):
     monkeypatch.setattr(
         llm_core.httpx, "post",
         lambda *a, **kw: _sync_response(_openai_msg("", "I reasoned through it")),
     )
-    result = llm_core.llm_call(
-        "http://test/v1", "qwen3-8b",
-        [{"role": "user", "content": "think"}],
-    )
-    assert result == "I reasoned through it"
+    with pytest.raises(HTTPException, match="no final answer"):
+        llm_core.llm_call(
+            "http://test/v1", "qwen3-8b",
+            [{"role": "user", "content": "think"}],
+        )
 
 
 # ---------------------------------------------------------------------------
-# 2. llm_call_async (async): empty content → falls back to reasoning_content
+# 2. llm_call_async (async): reasoning-only response is not a user-facing answer
 # ---------------------------------------------------------------------------
 
-def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch):
+def test_llm_call_async_rejects_reasoning_only_response(monkeypatch):
     class _FakeAsyncClient:
         async def post(self, *a, **kw):
             req = httpx.Request("POST", "http://test-async/v1/chat/completions")
@@ -62,11 +63,11 @@ def test_llm_call_async_returns_reasoning_content_when_content_empty(monkeypatch
     monkeypatch.setattr(llm_core, "_get_http_client",
                         lambda: _FakeAsyncClient())
 
-    result = asyncio.run(llm_core.llm_call_async(
-        "http://test-async/v1", "qwen3-8b",
-        [{"role": "user", "content": "think"}],
-    ))
-    assert result == "async reasoning text"
+    with pytest.raises(HTTPException, match="no final answer"):
+        asyncio.run(llm_core.llm_call_async(
+            "http://test-async/v1", "qwen3-8b",
+            [{"role": "user", "content": "think"}],
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,29 @@ def test_llm_call_content_wins_over_reasoning_content(monkeypatch):
         [{"role": "user", "content": "hi"}],
     )
     assert result == "Normal answer"
+
+
+def test_llm_call_returns_only_mistral_text_block(monkeypatch):
+    payload = {
+        "choices": [{
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": [{"type": "text", "text": "private reasoning"}]},
+                    {"type": "text", "text": "Final answer."},
+                ]
+            }
+        }]
+    }
+    monkeypatch.setattr(
+        llm_core.httpx,
+        "post",
+        lambda *a, **kw: _sync_response(payload),
+    )
+    result = llm_core.llm_call(
+        "http://test/v1", "mistral-small",
+        [{"role": "user", "content": "answer"}],
+    )
+    assert result == "Final answer."
 
 
 # ---------------------------------------------------------------------------

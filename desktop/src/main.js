@@ -4,9 +4,24 @@ import { ConversationController, STATES } from './conversation.js';
 import { microphoneErrorMessage } from './microphone.js';
 import { encodePcmWav } from './audio.js';
 import { spokenText } from './speech.js';
+import {
+  audioCaptureConstraints,
+  audioProcessingNotice,
+  readVoiceCaptureSettings,
+  SpeechEndpointing,
+} from '../../static/js/voice_capture.mjs';
+import {
+  focusActivatedInterface,
+  hostBridgeNotice,
+  resolveActivationShortcut,
+  retainUnsentMessage,
+  voiceInputNotice,
+} from './activation.js';
+import { pollBackendReadiness, singleFlight } from './startup.js';
 
 const $ = id => document.getElementById(id);
-const ENDPOINTING = Object.freeze({ speechRms: 0.022, quietMs: 1250, maxUtteranceMs: 15000, minAudioBytes: 1000 });
+const frontendStartedAt = performance.now();
+const MIN_AUDIO_BYTES = 1000;
 const overlay = $('overlay');
 const loginPanel = $('login');
 let backend = localStorage.getItem('odysseus.backend') || 'http://127.0.0.1:7000';
@@ -30,15 +45,31 @@ let hideInProgress = false;
 let captureGeneration = 0;
 let captureStarting = null;
 let captureTimeout = null;
+let voiceSettings = readVoiceCaptureSettings();
 let voiceNotice = '';
+let backendReady = false;
+let voiceInputAvailable = false;
+let pendingVoiceReply = false;
 
 $('backend').value = backend;
+const maxUtterance = $('max-utterance');
+const noiseSuppression = $('noise-suppression');
+maxUtterance.value = String(voiceSettings.maxUtteranceMs / 1000);
+noiseSuppression.value = voiceSettings.noiseSuppression;
+maxUtterance.addEventListener('change', () => {
+  localStorage.setItem('odysseus.voice.maxUtteranceSeconds', maxUtterance.value);
+  voiceSettings = readVoiceCaptureSettings();
+});
+noiseSuppression.addEventListener('change', () => {
+  localStorage.setItem('odysseus.voice.noiseSuppression', noiseSuppression.value);
+  voiceSettings = readVoiceCaptureSettings();
+});
 const controller = new ConversationController({
   onState(state, detail) {
     overlay.dataset.state = state;
-    const labels = { idle:'Ready', listening:'Listening…', transcribing:'Transcribing…', thinking:'Thinking…', synthesizing:'Preparing voice…', speaking:'Speaking…', interrupted:'Starting microphone…', error:'Needs attention' };
+    const labels = { idle:'Ready', listening:'Listening…', processing:'Processing audio…', transcribing:'Transcribing…', thinking:'Thinking…', synthesizing:'Preparing voice…', speaking:'Speaking…', interrupted:'Starting microphone…', error:'Needs attention' };
     $('state-label').textContent = labels[state] || 'Ready';
-    $('mic-label').textContent = state === STATES.LISTENING ? 'Stop listening' : [STATES.SYNTHESIZING, STATES.SPEAKING].includes(state) ? 'Interrupt' : 'Start listening';
+    $('mic-label').textContent = state === STATES.LISTENING ? 'Stop listening' : [STATES.PROCESSING, STATES.TRANSCRIBING, STATES.THINKING, STATES.SYNTHESIZING, STATES.SPEAKING].includes(state) ? 'Interrupt' : 'Start listening';
     $('mic').setAttribute('aria-label', $('mic-label').textContent);
     $('error').textContent = state === STATES.ERROR ? detail : voiceNotice;
     if (state === STATES.ERROR && /sign in again/i.test(detail || '')) {
@@ -48,13 +79,13 @@ const controller = new ConversationController({
     }
   },
   async startCapture() { await startCapture(); },
-  async stopCapture(submit) { await stopCapture(submit); },
+  async stopCapture(submit) { return stopCapture(submit); },
   async transcribe(blob, requestId) {
     return invoke('transcribe', { audioBase64: await blobToBase64(blob), mimeType: blob.type || 'audio/webm', requestId });
   },
   async ensureSession() {
     if (sessionId) return sessionId;
-    if (!modelInfo) modelInfo = await invoke('get_voice_model');
+    if (!modelInfo) modelInfo = await invoke('get_default_chat_model');
     if (!sessionPromise) {
       sessionPromise = invoke('create_voice_session', { endpointId: modelInfo.endpoint_id, model: modelInfo.model })
         .then(id => { sessionId = id; return id; })
@@ -93,7 +124,16 @@ const controller = new ConversationController({
   },
   async speak(text, requestId, events) { await speak(text, requestId, events); },
   async stopTts() { stopTts(); },
-  onTranscript(text) { $('transcript').textContent = text; voiceNotice = ''; $('error').textContent = ''; },
+  onTranscript(text) { $('transcript').textContent = text; },
+  onVoiceTranscript(text) {
+    $('transcript').textContent = text;
+    $('message').value = retainUnsentMessage(text, $('message').value);
+    $('message').dispatchEvent(new Event('input', { bubbles: true }));
+    $('message').focus();
+    pendingVoiceReply = true;
+    voiceNotice = 'Review or correct the transcript, then send it. Voice input is not speaker-verified.';
+    $('error').textContent = voiceNotice;
+  },
   onResponse(text, isDelta = false) {
     if (isDelta) { window.__voiceResponse = text; $('response').textContent = text; }
     else { window.__voiceResponse = ''; $('response').textContent = text; }
@@ -113,6 +153,11 @@ function reportDiagnostic(category, message) {
   const safeMessage = String(message || '').replace(/[\r\n\u0000-\u001f]/g, ' ').slice(0, 600);
   console.error(`[odysseus:${category}] ${safeMessage}`);
   void invoke('voice_diagnostic', { category, message: safeMessage }).catch(() => {});
+}
+
+function recordActivationMetric(name, startedAt) {
+  const elapsedMs = performance.now() - startedAt;
+  void invoke('record_activation_metric', { name, elapsedMs }).catch(() => {});
 }
 
 function errorSummary(error) {
@@ -270,9 +315,10 @@ async function beginCapture() {
   }
 
   const generation = ++captureGeneration;
+  const captureSettings = voiceSettings;
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    stream = await navigator.mediaDevices.getUserMedia(audioCaptureConstraints(captureSettings.noiseSuppression));
   } catch (error) {
     throw new Error(microphoneErrorMessage(error));
   }
@@ -281,6 +327,12 @@ async function beginCapture() {
     return;
   }
   media = stream;
+  const audioTrack = stream.getAudioTracks()[0];
+  const processingNotice = audioProcessingNotice(audioTrack?.getSettings?.(), captureSettings.noiseSuppression);
+  if (processingNotice) {
+    voiceNotice = [voiceNotice, processingNotice].filter(Boolean).join(' ');
+    $('error').textContent = voiceNotice;
+  }
 
   const mimeType = typeof window.MediaRecorder?.isTypeSupported === 'function'
     ? ['audio/webm;codecs=opus', 'audio/webm'].find(type => {
@@ -319,9 +371,14 @@ async function beginCapture() {
     }
 
     const source = audioContext.createMediaStreamSource(stream);
+    const vadFilter = audioContext.createBiquadFilter();
+    vadFilter.type = 'highpass';
+    vadFilter.frequency.value = 80;
+    vadFilter.Q.value = 0.707;
     analyser = audioContext.createAnalyser();
     analyser.fftSize = 512;
-    source.connect(analyser);
+    source.connect(vadFilter);
+    vadFilter.connect(analyser);
     const silentOutput = audioContext.createGain();
     silentOutput.gain.value = 0;
     analyser.connect(silentOutput);
@@ -347,10 +404,11 @@ async function beginCapture() {
     }
     if (audioContext) { await audioContext.close().catch(() => {}); audioContext = null; }
     analyser = null;
+    voiceNotice = 'Automatic silence detection is unavailable; use Stop listening to finish the recording.';
+    $('error').textContent = voiceNotice;
   }
 
   listening = true;
-  const audioTrack = stream.getAudioTracks()[0];
   audioTrack?.addEventListener('ended', () => {
     if (generation !== captureGeneration || !listening) return;
     void stopCapture(false).then(() => {
@@ -360,25 +418,31 @@ async function beginCapture() {
     });
   }, { once: true });
 
+  const endpointing = new SpeechEndpointing();
   let hasVoice = !analyser;
-  let silenceMs = 0;
   const startedAt = performance.now();
   if (analyser) {
-    const samples = new Uint8Array(analyser.fftSize);
+    const samples = typeof analyser.getFloatTimeDomainData === 'function'
+      ? new Float32Array(analyser.fftSize)
+      : new Uint8Array(analyser.fftSize);
     let lastFrame = startedAt;
     const detect = () => {
       if (generation !== captureGeneration || !listening) return;
       const now = performance.now();
       const delta = now - lastFrame; lastFrame = now;
-      analyser.getByteTimeDomainData(samples);
+      if (samples instanceof Float32Array) analyser.getFloatTimeDomainData(samples);
+      else analyser.getByteTimeDomainData(samples);
       let sum = 0;
-      for (const sample of samples) { const value = (sample - 128) / 128; sum += value * value; }
+      for (const sample of samples) {
+        const value = samples instanceof Float32Array ? sample : (sample - 128) / 128;
+        sum += value * value;
+      }
       const rms = Math.sqrt(sum / samples.length);
-      if (rms > ENDPOINTING.speechRms) { hasVoice = true; silenceMs = 0; }
-      else if (hasVoice) silenceMs += delta;
-      if (hasVoice && silenceMs > ENDPOINTING.quietMs) { void stopCapture(true); return; }
-      if (now - startedAt > ENDPOINTING.maxUtteranceMs) {
-        void stopCapture(hasVoice).then(() => { if (!hasVoice) void resumeAfterEmptyCapture(); });
+      const state = endpointing.update(rms, delta);
+      hasVoice = state.speechDetected;
+      if (state.finalized) { void finalizeCapture(); return; }
+      if (now - startedAt >= captureSettings.maxUtteranceMs) {
+        void finishAtMaximumDuration(hasVoice);
         return;
       }
       requestAnimationFrame(detect);
@@ -387,9 +451,25 @@ async function beginCapture() {
   }
   captureTimeout = setTimeout(() => {
     if (generation === captureGeneration && listening) {
-      void stopCapture(hasVoice).then(() => { if (!hasVoice) void resumeAfterEmptyCapture(); });
+      void finishAtMaximumDuration(hasVoice);
     }
-  }, ENDPOINTING.maxUtteranceMs + 100);
+  }, captureSettings.maxUtteranceMs + 100);
+}
+
+async function finalizeCapture() {
+  try {
+    const blob = await stopCapture(true);
+    if (blob) void controller.submitAudio(blob);
+    else void resumeAfterEmptyCapture();
+  } catch (error) {
+    controller.transition(STATES.ERROR, error.message || String(error));
+  }
+}
+
+async function finishAtMaximumDuration(hasVoice) {
+  if (hasVoice) return finalizeCapture();
+  await stopCapture(false);
+  await resumeAfterEmptyCapture();
 }
 
 async function resumeAfterEmptyCapture() {
@@ -400,24 +480,36 @@ async function resumeAfterEmptyCapture() {
 }
 
 async function stopCapture(submit = false) {
-  if (!listening && !media && recorder?.state !== 'recording' && !pcmProcessor && !captureStarting) return;
+  if (!listening && !media && recorder?.state !== 'recording' && !pcmProcessor && !captureStarting) return null;
   captureGeneration++;
   listening = false;
   if (captureTimeout) { clearTimeout(captureTimeout); captureTimeout = null; }
 
   const activeRecorder = recorder;
   recorder = null;
+  let recorderStopped = null;
   if (activeRecorder?.state === 'recording') {
     const chunks = recorderChunks || [];
     recorderChunks = null;
     if (submit) {
-      activeRecorder.onstop = () => {
-        const blob = new Blob(chunks, { type: activeRecorder.mimeType || 'audio/webm' });
-        if (blob.size > ENDPOINTING.minAudioBytes) void controller.submitAudio(blob);
-        else void resumeAfterEmptyCapture();
-      };
+      let resolveStopped;
+      let rejectStopped;
+      recorderStopped = new Promise((resolve, reject) => {
+        resolveStopped = resolve;
+        rejectStopped = reject;
+      });
+      activeRecorder.addEventListener('stop', () => {
+        resolveStopped(new Blob(chunks, { type: activeRecorder.mimeType || 'audio/webm' }));
+      }, { once: true });
+      activeRecorder.addEventListener('error', event => {
+        rejectStopped(event.error || new Error('Microphone recording could not be finalized.'));
+      }, { once: true });
     }
-    activeRecorder.stop();
+    try { activeRecorder.stop(); }
+    catch (error) {
+      if (rejectStopped) rejectStopped(error);
+      else throw error;
+    }
   } else {
     recorderChunks = null;
   }
@@ -434,32 +526,160 @@ async function stopCapture(submit = false) {
   if (media) { media.getTracks().forEach(track => track.stop()); media = null; }
   if (audioContext) { await audioContext.close().catch(() => {}); audioContext = null; }
 
-  if (wavBlob) {
-    if (wavBlob.size > ENDPOINTING.minAudioBytes) void controller.submitAudio(wavBlob);
-    else void resumeAfterEmptyCapture();
-  }
+  const recordedBlob = recorderStopped ? await recorderStopped : null;
+  const blob = recordedBlob || wavBlob;
+  return submit && blob?.size > MIN_AUDIO_BYTES ? blob : null;
 }
 
 // Login and startup
-async function connect() {
+const connect = singleFlight(connectBackend);
+
+async function connectBackend() {
+  const activationStartedAt = performance.now();
+  backendReady = false;
   backend = $('backend').value.trim();
   localStorage.setItem('odysseus.backend', backend);
   $('login-error').textContent = '';
+  loginPanel.hidden = true;
+  overlay.hidden = false;
+  $('state-label').textContent = 'Starting desktop…';
+  $('message').focus();
+  $('retry-connection').hidden = true;
+  let shortcutMessage = '';
+  let serviceErrors = [];
   try {
     const shortcutDiagnostic = await invoke('get_shortcut_diagnostic');
-    if (shortcutDiagnostic) $('shortcut-hint').textContent = shortcutDiagnostic;
-    const status = await invoke('backend_status', { backend });
-    if (!status.authenticated) { loginPanel.hidden = false; overlay.hidden = true; return; }
-    await enterAssistant();
-  } catch (error) { loginPanel.hidden = false; overlay.hidden = true; $('login-error').textContent = error.message || String(error); }
+    shortcutMessage = shortcutDiagnostic;
+    const activeShortcut = await invoke('get_activation_shortcut');
+    const storedShortcut = localStorage.getItem('odysseus.activationShortcut');
+    let savedShortcut = resolveActivationShortcut(storedShortcut, activeShortcut);
+    if (savedShortcut !== activeShortcut) {
+      try { await invoke('set_activation_shortcut', { shortcut: savedShortcut }); }
+      catch (error) {
+        shortcutMessage = error.message || String(error);
+        savedShortcut = storedShortcut || activeShortcut;
+      }
+    }
+    if (storedShortcut === 'Shift+Enter' && savedShortcut === activeShortcut) {
+      try {
+        await invoke('set_activation_shortcut', { shortcut: activeShortcut });
+        localStorage.setItem('odysseus.activationShortcut', activeShortcut);
+      } catch (error) {
+        shortcutMessage = error.message || String(error);
+        savedShortcut = storedShortcut;
+      }
+    }
+    $('shortcut-hint').replaceChildren(
+      document.createTextNode(`${savedShortcut.toUpperCase()} `),
+      Object.assign(document.createElement('i'), { textContent: 'to open · configure' }),
+    );
+    $('state-label').textContent = 'Starting backend and host bridge…';
+    const serviceStartStartedAt = performance.now();
+    let startup = {};
+    try {
+      startup = await invoke('start_background_services', { backend });
+      serviceErrors = startup.errors || [];
+    } catch (error) {
+      serviceErrors = [error.message || String(error)];
+    }
+    recordActivationMetric('backend_service_start_request', serviceStartStartedAt);
+
+    if (startup.backend_error) {
+      $('state-label').textContent = 'Backend startup blocked';
+      $('error').textContent = [
+        startup.backend_error,
+        'Start or enable Docker Engine, then choose Retry connection.',
+        startup.host_bridge_error,
+        shortcutMessage,
+      ].filter(Boolean).join(' ');
+      $('retry-connection').hidden = false;
+      return;
+    }
+    let status;
+    try {
+      status = await pollBackendReadiness({
+        probe: async () => {
+          try {
+            return await invoke('backend_status', { backend });
+          } catch (error) {
+            const serviceStatus = await invoke('background_service_status').catch(() => ({}));
+            if (serviceStatus.backend === 'failed') {
+              const failure = new Error(
+                'Docker Compose backend startup failed. Inspect it with: journalctl --user -u odysseus-backend.service',
+              );
+              failure.cause = error;
+              failure.terminal = true;
+              throw failure;
+            }
+            throw error;
+          }
+        },
+        isTerminalError: error => Boolean(error?.terminal),
+        onRetry: () => { $('state-label').textContent = 'Waiting for backend readiness…'; },
+      });
+    } catch (error) {
+      recordActivationMetric('backend_startup_timeout_after', activationStartedAt);
+      const serviceStatus = await invoke('background_service_status').catch(() => ({}));
+      $('state-label').textContent = 'Backend startup failed';
+      $('error').textContent = [
+        error.message,
+        serviceStatus.backend && serviceStatus.backend !== 'failed'
+          ? `Backend service: ${serviceStatus.backend}.`
+          : '',
+        hostBridgeNotice(serviceStatus.host_bridge),
+        ...serviceErrors,
+        shortcutMessage,
+      ].filter(Boolean).join(' ');
+      $('retry-connection').hidden = false;
+      return;
+    }
+    recordActivationMetric('backend_ready_after_activation', activationStartedAt);
+    if (!status.authenticated) {
+      backendReady = false;
+      loginPanel.hidden = false;
+      overlay.hidden = true;
+      $('username').focus();
+      return;
+    }
+    const bridgeStatusStartedAt = performance.now();
+    const services = await invoke('background_service_status').catch(() => ({}));
+    recordActivationMetric('host_bridge_service_status', bridgeStatusStartedAt);
+    const notices = [
+      ...serviceErrors,
+      hostBridgeNotice(services.host_bridge),
+      shortcutMessage,
+    ].filter(Boolean);
+    await enterAssistant(notices);
+  } catch (error) {
+    $('state-label').textContent = 'Backend connection failed';
+    $('error').textContent = error.message || String(error);
+    $('retry-connection').hidden = false;
+  }
 }
 
-async function enterAssistant() {
-  modelInfo = await invoke('get_voice_model');
+async function enterAssistant(notices = []) {
   loginPanel.hidden = true; overlay.hidden = false;
-  $('error').textContent = '';
-  try { await controller.startListening(); }
-  catch (error) { controller.transition(STATES.ERROR, error.message || String(error)); }
+  backendReady = true;
+  $('state-label').textContent = 'Ready';
+  $('message').focus();
+  const captureSupported = Boolean(
+    navigator.mediaDevices?.getUserMedia
+    && (window.MediaRecorder || window.AudioContext || window.webkitAudioContext),
+  );
+  let sttStatus = null;
+  if (captureSupported) {
+    try { sttStatus = await invoke('stt_status'); }
+    catch (error) { sttStatus = { available: false, reason: error.message || String(error) }; }
+  }
+  voiceInputAvailable = captureSupported
+    && Boolean(sttStatus?.available)
+    && sttStatus?.provider !== 'browser';
+  voiceNotice = [
+    ...notices,
+    voiceInputNotice({ captureSupported, sttStatus }),
+    'Speaker verification is unavailable; voice is not identity-verified. Sign-in, permissions, and approvals still apply.',
+  ].filter(Boolean).join(' ');
+  $('error').textContent = voiceNotice;
 }
 
 $('login-button').addEventListener('click', async event => {
@@ -470,6 +690,8 @@ $('login-button').addEventListener('click', async event => {
     if (result.requires_totp) { $('totp-wrap').hidden = false; $('login-error').textContent = 'Enter your authenticator code to continue.'; return; }
     if (!result.ok) throw new Error('Sign in was not completed');
     $('password').value = ''; $('totp').value = '';
+    const status = await invoke('backend_status', { backend });
+    if (!status.authenticated) throw new Error('Sign in again to continue');
     await enterAssistant();
   } catch (error) { $('login-error').textContent = error.message || String(error); }
 });
@@ -478,21 +700,40 @@ $('composer').addEventListener('submit', async event => {
   event.preventDefault();
   const value = $('message').value.trim();
   if (!value) return;
+  if (!backendReady) {
+    $('error').textContent = 'Jarvis is still connecting. Choose Retry connection before sending a message.';
+    return;
+  }
+  if ([STATES.PROCESSING, STATES.TRANSCRIBING, STATES.THINKING, STATES.SYNTHESIZING, STATES.SPEAKING].includes(controller.state)) {
+    $('error').textContent = 'A request is already in progress. Wait for it to finish before sending another message.';
+    return;
+  }
   voiceNotice = '';
   $('error').textContent = '';
   $('message').value = '';
-  if ([STATES.TRANSCRIBING, STATES.THINKING, STATES.SYNTHESIZING, STATES.SPEAKING].includes(controller.state)) {
-    await controller.interrupt({ resume: false });
+  const sent = await controller.sendText(value, { speakResponse: pendingVoiceReply });
+  if (!sent) {
+    $('message').value = retainUnsentMessage(value, $('message').value);
+    $('error').textContent = [
+      $('error').textContent,
+      'The message was not completed and remains in the composer. Review it before retrying.',
+    ].filter(Boolean).join(' ');
+    $('message').focus();
+  } else {
+    pendingVoiceReply = false;
   }
-  await controller.sendText(value);
 });
 $('mic').addEventListener('click', async () => {
+  if (!backendReady) { $('error').textContent = 'Jarvis is still connecting. Retry before using voice.'; return; }
+  if (!voiceInputAvailable) { $('error').textContent = voiceNotice; return; }
   if (controller.state === STATES.LISTENING) await controller.stopListening();
-  else if ([STATES.SPEAKING, STATES.SYNTHESIZING, STATES.THINKING, STATES.TRANSCRIBING].includes(controller.state)) await controller.interrupt({ resume: true });
+  else if ([STATES.SPEAKING, STATES.SYNTHESIZING, STATES.THINKING, STATES.TRANSCRIBING, STATES.PROCESSING].includes(controller.state)) await controller.interrupt({ resume: true });
   else { try { await controller.startListening(); } catch (error) { controller.transition(STATES.ERROR, error.message || String(error)); } }
 });
 $('orb').addEventListener('click', async () => {
-  if ([STATES.SPEAKING, STATES.SYNTHESIZING, STATES.THINKING, STATES.TRANSCRIBING].includes(controller.state)) await controller.interrupt({ resume: true });
+  if (!backendReady) { $('error').textContent = 'Jarvis is still connecting. Retry before using voice.'; return; }
+  if (!voiceInputAvailable) { $('error').textContent = voiceNotice; return; }
+  if ([STATES.SPEAKING, STATES.SYNTHESIZING, STATES.THINKING, STATES.TRANSCRIBING, STATES.PROCESSING].includes(controller.state)) await controller.interrupt({ resume: true });
   else if (controller.state === STATES.LISTENING) await controller.stopListening();
   else { try { await controller.startListening(); } catch (error) { controller.transition(STATES.ERROR, error.message || String(error)); } }
 });
@@ -504,18 +745,39 @@ async function dismiss() {
   finally { hideInProgress = false; }
 }
 $('dismiss').addEventListener('click', dismiss);
+$('retry-connection').addEventListener('click', () => { void connect(); });
+$('shortcut-hint').addEventListener('click', async () => {
+  const shortcut = window.prompt('Enter a global activation shortcut (for example Ctrl+Alt+Shift+J):',
+    localStorage.getItem('odysseus.activationShortcut') || $('shortcut-hint').textContent.split(' ')[0]);
+  if (shortcut === null) return;
+  try {
+    await invoke('set_activation_shortcut', { shortcut });
+    localStorage.setItem('odysseus.activationShortcut', shortcut.trim());
+    $('shortcut-hint').replaceChildren(
+      document.createTextNode(`${shortcut.trim().toUpperCase()} `),
+      Object.assign(document.createElement('i'), { textContent: 'to open · configure' }),
+    );
+    $('error').textContent = '';
+  } catch (error) {
+    $('error').textContent = error.message || String(error);
+  }
+});
 window.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); dismiss(); } });
 
 async function initialize() {
-  await listen('voice-activation', async () => {
-    if (loginPanel.hidden) {
-      if (controller.state === STATES.IDLE || controller.state === STATES.ERROR) {
-        try { await controller.startListening(); } catch (error) { controller.transition(STATES.ERROR, error.message || String(error)); }
-      }
-    } else $('username').focus();
+  await listen('ui-activation', () => {
+    const activationStartedAt = performance.now();
+    focusActivatedInterface(loginPanel, $('username'), $('message'));
+    recordActivationMetric('warm_activation_to_focus', activationStartedAt);
   });
   window.addEventListener('tauri://focus', () => {});
   window.addEventListener('beforeunload', () => { void controller.hide(); stopTts(); });
+  $('state-label').textContent = 'Starting desktop…';
+  const focusStartedAt = performance.now();
+  $('message').focus();
+  recordActivationMetric('initial_input_focus', focusStartedAt);
+  void invoke('desktop_rendered').catch(() => {});
+  requestAnimationFrame(() => recordActivationMetric('frontend_first_frame', frontendStartedAt));
   await connect();
 }
 

@@ -44,6 +44,7 @@ from src.constants import BG_JOBS_DIR, BG_JOBS_FILE
 _JOBS_DIR = Path(BG_JOBS_DIR)
 _STORE = Path(BG_JOBS_FILE)
 _FOLLOWUP_LOCK = threading.Lock()
+_JOBS_LOCK = threading.Lock()
 
 # A job that runs longer than this is presumed stuck and reaped (the agent
 # still gets a "timed out" follow-up so nothing hangs forever).
@@ -54,6 +55,15 @@ _MAX_OUTPUT_CHARS = 16000
 # files) is kept before pruning, so neither the store nor data/bg_jobs/ grows
 # without bound. The agent has already consumed the result by then.
 _RETENTION_S = 3600  # 1 hour after follow-up
+
+
+def _max_concurrent_jobs_per_owner() -> int:
+    raw = os.getenv("ODYSSEUS_MAX_CONCURRENT_BACKGROUND_JOBS_PER_USER", "4").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 4
+    return max(1, value)
 
 
 def _load() -> Dict[str, Dict[str, Any]]:
@@ -81,13 +91,28 @@ def _pid_alive(pid: Optional[int]) -> bool:
 
 
 def launch(command: str, session_id: str, cwd: Optional[str] = None,
-           max_runtime_s: int = DEFAULT_MAX_RUNTIME_S) -> Dict[str, Any]:
+           max_runtime_s: int = DEFAULT_MAX_RUNTIME_S,
+           owner: Optional[str] = None) -> Dict[str, Any]:
     """Launch `command` detached. Returns the job record (status='running').
 
     Output + the final exit code are written to files so status survives a
     server restart. The process is put in its own session (setsid) so it
     outlives the request/stream that started it.
     """
+    from src.owner_identity import effective_storage_owner
+
+    resolved_owner = effective_storage_owner(owner)
+    if not resolved_owner:
+        raise ValueError("Background job requires a canonical owner")
+    with _JOBS_LOCK:
+        active_for_owner = sum(
+            1
+            for rec in _load().values()
+            if rec.get("owner") == resolved_owner
+            and rec.get("status") in ("launching", "running")
+        )
+        if active_for_owner >= _max_concurrent_jobs_per_owner():
+            raise ValueError("Per-user concurrent background-job limit reached")
     _JOBS_DIR.mkdir(parents=True, exist_ok=True)
     job_id = uuid.uuid4().hex[:12]
     log_path = _JOBS_DIR / f"{job_id}.log"
@@ -140,6 +165,7 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
     rec = {
         "id": job_id,
         "session_id": session_id,
+        "owner": resolved_owner,
         "command": command,
         "status": "launching",     # launching | running | done | failed
         "pid": None,
@@ -152,9 +178,10 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         "exit_path": str(exit_path),
         "pid_path": str(pid_path),
     }
-    jobs = _load()
-    jobs[job_id] = rec
-    _save(jobs)
+    with _JOBS_LOCK:
+        jobs = _load()
+        jobs[job_id] = rec
+        _save(jobs)
 
     try:
         proc = subprocess.Popen(
@@ -364,27 +391,53 @@ def mark_followed_up(job_id: str) -> None:
         _save(jobs)
 
 
-def get(job_id: str) -> Optional[Dict[str, Any]]:
+def get(job_id: str, owner: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if owner is None:
+        return None
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return None
     refresh()  # reconcile against disk so status/exit_code are current
     rec = _load().get(job_id)
     if rec:
+        if rec.get("owner") != normalized_owner:
+            return None
         rec = dict(rec)
         rec["output"] = _read_output(rec)
     return rec
 
 
-def list_for_session(session_id: str) -> List[Dict[str, Any]]:
-    return [r for r in refresh().values() if r.get("session_id") == session_id]
+def list_for_session(session_id: str, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    if owner is None:
+        return []
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return []
+    return [
+        r for r in refresh().values()
+        if r.get("session_id") == session_id
+        and r.get("owner") == normalized_owner
+    ]
 
 
-def kill(job_id: str) -> Optional[Dict[str, Any]]:
+def kill(job_id: str, owner: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Terminate a running job's process tree and mark it killed. Returns the
     updated record, or None if the id is unknown. Idempotent: a job that already
     finished is returned unchanged. Sets followed_up so the monitor does not also
     fire an auto-continue for a job the agent deliberately stopped."""
+    if owner is None:
+        return None
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return None
     jobs = _load()
     rec = jobs.get(job_id)
     if rec is None:
+        return None
+    if rec.get("owner") != normalized_owner:
         return None
     if rec.get("status") == "running":
         _kill(rec.get("pid"))
@@ -395,6 +448,32 @@ def kill(job_id: str) -> Optional[Dict[str, Any]]:
         rec["followed_up"] = True
         _save(jobs)
     return rec
+
+
+def cancel_owner(owner: Optional[str]) -> int:
+    """Cancel all running jobs owned by a canonical owner."""
+    if owner is None:
+        return 0
+    from src.owner_identity import effective_storage_owner
+    normalized_owner = effective_storage_owner(owner)
+    if not normalized_owner:
+        return 0
+    cancelled = 0
+    jobs = _load()
+    for rec in jobs.values():
+        if rec.get("owner") != normalized_owner:
+            continue
+        if rec.get("status") == "running":
+            _kill(rec.get("pid"))
+            rec["status"] = "failed"
+            rec["exit_code"] = -1
+            rec["ended_at"] = time.time()
+            rec["killed"] = True
+            rec["followed_up"] = True
+            cancelled += 1
+    if cancelled:
+        _save(jobs)
+    return cancelled
 
 
 def result_text(rec: Dict[str, Any]) -> str:

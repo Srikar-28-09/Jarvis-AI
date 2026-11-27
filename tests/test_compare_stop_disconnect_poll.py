@@ -84,7 +84,7 @@ def _make_stream_with_save(sink, chunks, *, hang_after=None):
 async def _collect_subscription(session_id, expected_run=None):
     return [
         event
-        async for event in agent_runs.subscribe(session_id, expected_run)
+        async for event in agent_runs.subscribe(session_id, expected_run, owner="test-owner")
     ]
 
 
@@ -102,11 +102,11 @@ async def test_detached_run_keeps_going_after_subscriber_disconnects():
 
     chunks = ["hello", " world", "!"]
     agen = _make_stream_with_save(sink, chunks)
-    run = agent_runs.start(session_id, agen)
+    run = agent_runs.start(session_id, agen, owner="test-owner")
 
     # Subscribe, then immediately disconnect (simulate the client closing the
     # SSE) — by simply breaking out of the async-for over subscribe().
-    sub = agent_runs.subscribe(session_id)
+    sub = agent_runs.subscribe(session_id, owner="test-owner")
     async for _ in sub:
         break
     await sub.aclose()
@@ -132,18 +132,18 @@ async def test_stop_cancels_detached_run_and_saves_partial_exactly_once():
     # Hang after the 2nd chunk so cancellation must interrupt an in-flight
     # await — not just be noticed between already-arrived chunks.
     agen = _make_stream_with_save(sink, chunks, hang_after=2)
-    run = agent_runs.start(session_id, agen)
+    run = agent_runs.start(session_id, agen, owner="test-owner")
 
     # Let it stream the first two chunks, then get stuck on the third.
     received = []
-    sub = agent_runs.subscribe(session_id)
+    sub = agent_runs.subscribe(session_id, owner="test-owner")
     async for ev in sub:
         received.append(ev)
         if len(received) >= 2:
             break
     await sub.aclose()
 
-    stopped = agent_runs.stop(session_id, run.run_id)
+    stopped = agent_runs.stop(session_id, run.run_id, owner="test-owner")
     assert stopped is True
 
     await run.task  # propagates promptly — not stuck on the hung await
@@ -164,7 +164,7 @@ async def test_normal_completion_saves_exactly_once_not_partial():
     agent_runs._RUNS.pop(session_id, None)
 
     agen = _make_stream_with_save(sink, ["one", "two", "three"])
-    run = agent_runs.start(session_id, agen)
+    run = agent_runs.start(session_id, agen, owner="test-owner")
     await run.task
 
     assert run.status == "done"
@@ -177,15 +177,15 @@ async def test_detached_run_identity_is_stable_for_replay_and_unique_per_run():
     session_id = "sess-detached-run-identity"
     agent_runs._RUNS.pop(session_id, None)
 
-    first = agent_runs.start(session_id, _make_stream_with_save(_FakeSaveSink(), ["one"]))
+    first = agent_runs.start(session_id, _make_stream_with_save(_FakeSaveSink(), ["one"]), owner="test-owner")
     first_id = first.run_id
-    assert agent_runs.get_run_id(session_id) == first_id
+    assert agent_runs.get_run_id(session_id, owner="test-owner") == first_id
     await first.task
-    assert agent_runs.get_run_id(session_id) == first_id
+    assert agent_runs.get_run_id(session_id, owner="test-owner") == first_id
 
-    second = agent_runs.start(session_id, _make_stream_with_save(_FakeSaveSink(), ["two"]))
+    second = agent_runs.start(session_id, _make_stream_with_save(_FakeSaveSink(), ["two"]), owner="test-owner")
     assert second.run_id != first_id
-    assert agent_runs.get_run_id(session_id) == second.run_id
+    assert agent_runs.get_run_id(session_id, owner="test-owner") == second.run_id
     await second.task
 
 
@@ -197,18 +197,18 @@ async def test_lazy_subscription_stays_bound_to_header_run_after_replacement():
     async def stream(label):
         yield f'data: {{"delta":"{label}"}}\n\n'
 
-    first = agent_runs.start(session_id, stream("first"))
+    first = agent_runs.start(session_id, stream("first"), owner="test-owner")
     await first.task
     # StreamingResponse does not iterate its body until after construction.
     # Capture the same exact run object used for its identity header.
-    lazy_body = agent_runs.subscribe(session_id, first)
+    lazy_body = agent_runs.subscribe(session_id, first, owner="test-owner")
 
-    second = agent_runs.start(session_id, stream("second"))
+    second = agent_runs.start(session_id, stream("second"), owner="test-owner")
     await second.task
 
     replayed = [event async for event in lazy_body]
     assert replayed == ['data: {"delta":"first"}\n\n']
-    assert agent_runs.get_run_id(session_id) == second.run_id
+    assert agent_runs.get_run_id(session_id, owner="test-owner") == second.run_id
 
 
 @pytest.mark.asyncio
@@ -224,15 +224,15 @@ async def test_stale_run_identity_cannot_stop_replacement_run():
         yield 'data: {"delta":"new"}\n\n'
         await release.wait()
 
-    first = agent_runs.start(session_id, finished())
+    first = agent_runs.start(session_id, finished(), owner="test-owner")
     await first.task
-    second = agent_runs.start(session_id, replacement())
+    second = agent_runs.start(session_id, replacement(), owner="test-owner")
     await asyncio.sleep(0)
 
     assert agent_runs.stop(session_id) is False
-    assert agent_runs.stop(session_id, first.run_id) is False
+    assert agent_runs.stop(session_id, first.run_id, owner="test-owner") is False
     assert second.task is not None and not second.task.done()
-    assert agent_runs.stop(session_id, second.run_id) is True
+    assert agent_runs.stop(session_id, second.run_id, owner="test-owner") is True
     await second.task
 
 
@@ -259,11 +259,11 @@ async def test_triple_replacement_closes_middle_subscriber_and_preserves_save_or
         third_started.set()
         yield 'data: {"delta":"third"}\n\n'
 
-    first = agent_runs.start(session_id, first_stream())
+    first = agent_runs.start(session_id, first_stream(), owner="test-owner")
     while not first.buffer:
         await asyncio.sleep(0)
 
-    middle = agent_runs.start(session_id, middle_stream())
+    middle = agent_runs.start(session_id, middle_stream(), owner="test-owner")
     await first_closing.wait()
     assert middle.task is not None and not middle.task.done()
 
@@ -273,7 +273,7 @@ async def test_triple_replacement_closes_middle_subscriber_and_preserves_save_or
     while not middle.subscribers:
         await asyncio.sleep(0)
 
-    third = agent_runs.start(session_id, third_stream())
+    third = agent_runs.start(session_id, third_stream(), owner="test-owner")
 
     # The superseded middle response closes immediately even though its task
     # remains as the transitive barrier for the first run's partial save.
@@ -311,8 +311,8 @@ async def test_reconnect_replays_pinned_fallback_run_without_restarting_tools():
         yield 'data: {"delta":"backup finished"}\n\n'
         yield "data: [DONE]\n\n"
 
-    run = agent_runs.start(session_id, pinned_run())
-    first = agent_runs.subscribe(session_id)
+    run = agent_runs.start(session_id, pinned_run(), owner="test-owner")
+    first = agent_runs.subscribe(session_id, owner="test-owner")
     first_events = []
     async for event in first:
         first_events.append(event)
@@ -325,7 +325,7 @@ async def test_reconnect_replays_pinned_fallback_run_without_restarting_tools():
     assert agent_runs._RUNS[session_id] is run
 
     resumed_events = []
-    resumed = agent_runs.subscribe(session_id)
+    resumed = agent_runs.subscribe(session_id, owner="test-owner")
     async for event in resumed:
         resumed_events.append(event)
         if len(resumed_events) == 2:
@@ -455,7 +455,8 @@ def test_compare_mode_branch_skips_agent_runs_in_source():
 
     branch_idx = src.index("if compare_mode:")
     direct_return_idx = src.index("return StreamingResponse(_safe_stream(), media_type=", branch_idx)
-    detach_idx = src.index("agent_runs.start(session, _safe_stream(), request_id=client_request_id)", branch_idx)
+    detach_idx = src.index("_detached_run = agent_runs.start(", branch_idx)
+    assert "owner=effective_user(request)" in src[detach_idx:]
 
     assert branch_idx < direct_return_idx < detach_idx, (
         "compare_mode must short-circuit to a direct (non-detached) "

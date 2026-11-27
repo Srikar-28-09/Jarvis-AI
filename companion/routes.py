@@ -23,7 +23,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from core.middleware import require_admin
-from src.auth_helpers import _auth_disabled, get_current_user
+from src.auth_helpers import _auth_disabled, get_current_user, require_user
+from src.owner_identity import effective_storage_owner
 
 from companion import pairing as _pairing
 
@@ -44,13 +45,9 @@ def token_owner(request: Request) -> str | None:
 def owner_can_see(row_owner, owner) -> bool:
     """Owner-scope rule for read endpoints.
 
-    A caller sees a row when it is their own, or when it is a legacy null-owner
-    ("shared") row. A caller must NEVER see another owner's row. Mirrors the
-    `owner_filter` rule used elsewhere, expressed as a pure predicate so it can
-    be tested directly and used as a defensive in-Python check alongside the
-    SQL filter.
+    A caller sees only an exact owner match. Ownerless records are not shared.
     """
-    return row_owner is None or row_owner == owner
+    return bool(owner) and row_owner == owner
 
 
 def require_models_scope(request: Request) -> None:
@@ -73,7 +70,11 @@ def mint_pairing_token(owner: str, invalidate=None) -> tuple[str, str]:
     `invalidate` is the app's request.app.state.invalidate_token_cache callable
     (passed in so this stays a pure, testable unit).
     """
-    token_id, raw_token = _pairing.mint_token(owner)
+    from src.owner_identity import effective_storage_owner
+    resolved_owner = effective_storage_owner(owner)
+    if not resolved_owner:
+        raise HTTPException(403, "Device pairing requires a canonical owner")
+    token_id, raw_token = _pairing.mint_token(resolved_owner)
     if callable(invalidate):
         invalidate()
     return token_id, raw_token
@@ -112,10 +113,9 @@ def setup_companion_routes() -> APIRouter:
 
         The stock /api/models route scopes to get_current_user, which for a
         bearer token is the sandboxed pseudo-user "api" (owns nothing). Here we
-        scope to the token's real owner instead, plus legacy null-owner shared
-        rows -- the same rule as owner_filter. Explicit auth-disabled mode keeps
-        the stock route's single-user all-endpoints view. Read-only; never
-        returns api_key material.
+        scope to the token's real owner instead. Ownerless records are excluded;
+        explicit auth-disabled mode can retain the local no-login inventory view.
+        Read-only; never returns api_key material.
         """
         require_models_scope(request)
         import json as _json
@@ -137,7 +137,7 @@ def setup_companion_routes() -> APIRouter:
                 (ModelEndpoint.model_type == "llm") | (ModelEndpoint.model_type == None),  # noqa: E711
             )
             if owner:
-                q = q.filter((ModelEndpoint.owner == owner) | (ModelEndpoint.owner == None))  # noqa: E711
+                q = q.filter(ModelEndpoint.owner == owner)
             for ep in q.all():
                 if not single_user_mode and not owner_can_see(ep.owner, owner):
                     continue
@@ -167,13 +167,13 @@ def setup_companion_routes() -> APIRouter:
 
     @router.get("/pair")
     def pair_page(request: Request):
-        """Admin-only pairing page. Renders a form that POSTs to mint a code.
+        """Owner-paired-device form. Renders a form that POSTs to mint a code.
 
         A GET never mints a credential: SameSite=Lax session cookies ride
         top-level GET navigations, so minting on GET would be triggerable by a
         link or <img> (CSRF). The actual mint is the POST handler below.
         """
-        require_admin(request)
+        require_user(request)
         page = """<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Pair a device</title>
@@ -188,23 +188,25 @@ def setup_companion_routes() -> APIRouter:
   <form method="POST" action="/api/companion/pair">
     <button type="submit">Generate pairing code</button>
   </form>
-  <p style="color:#8a8a96;font-size:12px;margin-top:18px">Admin only. Each code mints a new token, shown once. Manage or revoke under Settings &rarr; API tokens.</p>
+  <p style="color:#8a8a96;font-size:12px;margin-top:18px">Owner-scoped. Each code mints a new token, shown once. Manage or revoke under Settings &rarr; API tokens.</p>
 </div></body></html>"""
         return HTMLResponse(page)
 
     @router.post("/pair")
     def pair_create(request: Request):
-        """Mint a pairing code. Admin-cookie only; CSRF-safe because the
+        """Mint a pairing code for the authenticated owner. CSRF-safe because the
         SameSite=Lax session cookie is not sent on a cross-site POST (same
         protection as POST /api/tokens). Minting invalidates the token cache so
         the code works immediately, no restart. `?format=json` returns the
         payload for an in-app pairing screen."""
-        require_admin(request)
+        owner = require_user(request)
+        owner = effective_storage_owner(owner)
+        if not owner:
+            raise HTTPException(403, "Cannot pair a device without a canonical owner")
         try:
             configured_origin = _pairing.configured_companion_origin()
         except ValueError as exc:
             raise HTTPException(500, str(exc)) from None
-        owner = get_current_user(request)
         invalidate = getattr(request.app.state, "invalidate_token_cache", None)
         token_id, raw_token = mint_pairing_token(owner, invalidate)
 

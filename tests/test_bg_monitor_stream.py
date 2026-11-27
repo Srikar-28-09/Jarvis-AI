@@ -85,3 +85,31 @@ def test_background_drain_preserves_exact_approval_card(monkeypatch):
     _, events = asyncio.run(bg_monitor._drain_agent(sess, []))
 
     assert events[0]["ask_user"] == approval
+
+
+def test_background_followup_rejects_session_owner_mismatch(monkeypatch):
+    sm = SimpleNamespace(
+        get_session=lambda _session_id: SimpleNamespace(
+            id="s1",
+            owner="bob",
+        )
+    )
+    ai_interaction = types.ModuleType("src.ai_interaction")
+    ai_interaction.get_session_manager = lambda: sm
+    monkeypatch.setitem(sys.modules, "src.ai_interaction", ai_interaction)
+
+    uncertain = []
+    monkeypatch.setattr(
+        bg_monitor.bg_jobs,
+        "mark_followup_uncertain",
+        lambda job_id: uncertain.append(job_id),
+    )
+
+    handled = asyncio.run(bg_monitor._run_followup({
+        "id": "job-alice",
+        "session_id": "s1",
+        "owner": "alice",
+    }))
+
+    assert handled is False
+    assert uncertain == ["job-alice"]

@@ -1764,7 +1764,7 @@ def test_api_models_scopes_api_token_to_token_owner(monkeypatch):
 
     result = _route_endpoint(router, "/api/models")(request)
 
-    assert [item["endpoint_name"] for item in result["items"]] == ["alice", "shared"]
+    assert [item["endpoint_name"] for item in result["items"]] == ["alice"]
     assert admin_checks == ["alice"]
 
 

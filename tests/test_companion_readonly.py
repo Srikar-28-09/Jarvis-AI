@@ -176,9 +176,8 @@ def test_owner_sees_their_own_rows():
     assert owner_can_see("alice", "alice") is True
 
 
-def test_null_owner_shared_rows_are_visible():
-    # Legacy shared rows (owner is None) are visible to everyone by design...
-    assert owner_can_see(None, "alice") is True
+def test_null_owner_rows_are_not_shared():
+    assert owner_can_see(None, "alice") is False
 
 
 def test_null_owner_does_not_widen_access_to_others_rows():
@@ -191,16 +190,14 @@ def test_cross_owner_is_blocked():
     assert owner_can_see("alice", "bob") is False
 
 
-def test_unauthenticated_owner_sees_only_shared_rows():
-    # owner=None (no resolved caller): only null-owner shared rows are visible,
-    # never any owned row.
-    assert owner_can_see(None, None) is True
+def test_unauthenticated_owner_sees_no_rows():
+    assert owner_can_see(None, None) is False
     assert owner_can_see("alice", None) is False
 
 
 # --- GET /api/companion/models: route-level scoping -----------------------
 
-def test_models_route_scopes_cookie_user_to_owned_and_shared_rows(monkeypatch):
+def test_models_route_scopes_cookie_user_exactly(monkeypatch):
     rows = [
         _ep(1, "alice-endpoint", "alice"),
         _ep(2, "shared-endpoint", None),
@@ -214,10 +211,10 @@ def test_models_route_scopes_cookie_user_to_owned_and_shared_rows(monkeypatch):
         _request(api_token=False, current_user="ignored"),
     )
 
-    assert _endpoint_names(endpoints) == ["alice-endpoint", "shared-endpoint"]
+    assert _endpoint_names(endpoints) == ["alice-endpoint"]
 
 
-def test_models_route_scopes_api_token_to_token_owner(monkeypatch):
+def test_models_route_scopes_api_token_exactly(monkeypatch):
     rows = [
         _ep(1, "alice-endpoint", "alice"),
         _ep(2, "shared-endpoint", None),
@@ -236,7 +233,7 @@ def test_models_route_scopes_api_token_to_token_owner(monkeypatch):
         ),
     )
 
-    assert _endpoint_names(endpoints) == ["alice-endpoint", "shared-endpoint"]
+    assert _endpoint_names(endpoints) == ["alice-endpoint"]
 
 
 def test_models_route_rejects_api_token_without_chat_scope(monkeypatch):
@@ -256,7 +253,7 @@ def test_models_route_rejects_api_token_without_chat_scope(monkeypatch):
     assert "chat scope" in exc.value.detail
 
 
-def test_models_route_unresolved_owner_returns_only_shared_rows(monkeypatch):
+def test_models_route_unresolved_owner_returns_no_rows(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     rows = [
         _ep(1, "alice-endpoint", "alice"),
@@ -276,7 +273,7 @@ def test_models_route_unresolved_owner_returns_only_shared_rows(monkeypatch):
         ),
     )
 
-    assert _endpoint_names(endpoints) == ["shared-endpoint"]
+    assert _endpoint_names(endpoints) == []
 
 
 def test_models_route_auth_disabled_does_not_widen_ownerless_api_token(monkeypatch):
@@ -299,7 +296,7 @@ def test_models_route_auth_disabled_does_not_widen_ownerless_api_token(monkeypat
         ),
     )
 
-    assert _endpoint_names(endpoints) == ["shared-endpoint"]
+    assert _endpoint_names(endpoints) == []
 
 
 def test_models_route_auth_disabled_keeps_cookie_owner_scoped(monkeypatch):
@@ -317,10 +314,10 @@ def test_models_route_auth_disabled_keeps_cookie_owner_scoped(monkeypatch):
         _request(api_token=False, current_user="alice"),
     )
 
-    assert _endpoint_names(endpoints) == ["alice-endpoint", "shared-endpoint"]
+    assert _endpoint_names(endpoints) == ["alice-endpoint"]
 
 
-def test_models_route_auth_enabled_anonymous_returns_only_shared_rows(monkeypatch):
+def test_models_route_auth_enabled_anonymous_returns_no_rows(monkeypatch):
     monkeypatch.setenv("AUTH_ENABLED", "true")
     rows = [
         _ep(1, "alice-endpoint", "alice"),
@@ -335,7 +332,7 @@ def test_models_route_auth_enabled_anonymous_returns_only_shared_rows(monkeypatc
         _request(api_token=False, current_user=None),
     )
 
-    assert _endpoint_names(endpoints) == ["shared-endpoint"]
+    assert _endpoint_names(endpoints) == []
 
 
 def test_models_route_auth_disabled_returns_all_enabled_rows(monkeypatch):

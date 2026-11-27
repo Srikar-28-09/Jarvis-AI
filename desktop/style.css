@@ -51,11 +51,19 @@ button, input { font: inherit; }
 .composer input::placeholder { color:#68838a; }
 .send-button { width:32px; height:32px; border:1px solid rgba(119, 242, 239, .28); border-radius:10px; color:#dfffff; background:linear-gradient(145deg,rgba(28, 154, 163, .8),rgba(69, 94, 154, .76)); cursor:pointer; font-size:18px; }
 .controls { padding:13px 2px 0; }
+.voice-settings { margin-top:8px; color:#8ca9af; font-size:10px; text-align:left; }
+.voice-settings summary { width:max-content; cursor:pointer; letter-spacing:.04em; }
+.voice-settings label { display:inline-block; margin:7px 6px 0 0; }
+.voice-settings select { margin:5px 10px 0 0; border:1px solid rgba(113, 206, 219, .2); border-radius:7px; padding:4px 6px; color:#d5eef1; background:#10232c; font-size:10px; }
+.voice-settings p { margin:6px 0 0; color:#718b91; font-size:9px; }
 .mic-button { display:flex; align-items:center; gap:9px; border:0; color:#b7d9dd; background:transparent; padding:4px 0; cursor:pointer; font-size:11px; }
 .mic-glyph { display:grid; place-items:center; width:23px; height:23px; border:1px solid rgba(109, 217, 224, .3); border-radius:50%; color:#75e9e5; font-size:9px; }
-.shortcut { max-width:250px; color:#66828a; font-size:9px; line-height:1.35; letter-spacing:.12em; text-align:right; }
+.shortcut { max-width:250px; padding:0; border:0; background:transparent; color:#66828a; font:inherit; font-size:9px; line-height:1.35; letter-spacing:.12em; text-align:right; cursor:pointer; }
 .shortcut i { margin-left:4px; font-style:normal; letter-spacing:0; }
+.retry-button { margin-top:10px; padding:6px 10px; border:1px solid rgba(109, 217, 224, .3); border-radius:8px; color:#b7d9dd; background:rgba(109, 217, 224, .08); cursor:pointer; font-size:11px; }
+.retry-button[hidden] { display:none; }
 .overlay[data-state="listening"] .status-dot { color:#57e5dc; background:#57e5dc; }
+.overlay[data-state="processing"] .status-dot { color:#d8b274; background:#d8b274; }
 .overlay[data-state="listening"] .orb-halo { opacity:.7; animation:halo 2.4s ease-in-out infinite; }
 .overlay[data-state="listening"] .orb-core { transform:scale(.96); animation:breathe 2.2s ease-in-out infinite; }
 .overlay[data-state="listening"] .ring-middle { stroke:#58dce2; animation:spin 13s linear infinite; }

@@ -46,8 +46,25 @@
       </form>
       <footer class="controls">
         <button id="mic" class="mic-button" aria-label="Start listening"><span class="mic-glyph">●</span><span id="mic-label">Start listening</span></button>
-        <span id="shortcut-hint" class="shortcut">ALT + L <i>to open</i></span>
+        <button id="shortcut-hint" class="shortcut" type="button" title="Change global activation shortcut">ALT + L <i>to open · configure</i></button>
       </footer>
+      <details class="voice-settings">
+        <summary>Voice settings</summary>
+        <label for="max-utterance">Maximum utterance</label>
+        <select id="max-utterance">
+          <option value="30">30 seconds</option>
+          <option value="45">45 seconds</option>
+          <option value="60">60 seconds</option>
+          <option value="90">90 seconds</option>
+        </select>
+        <label for="noise-suppression">Built-in noise suppression</label>
+        <select id="noise-suppression">
+          <option value="standard">Platform default</option>
+          <option value="off">Off</option>
+        </select>
+        <p>Audio processing is provided by the system and exposes on/off only. Voice input is not speaker-verified.</p>
+      </details>
+      <button id="retry-connection" class="retry-button" type="button" hidden>Retry connection</button>
     </main>
     <section id="login" class="login-panel" hidden>
       <div class="login-brand">ODYSSEUS <span>VOICE</span></div>

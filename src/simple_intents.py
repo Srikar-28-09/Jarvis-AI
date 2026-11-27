@@ -42,6 +42,108 @@ _EXPLICIT_DETAIL_RE = re.compile(
     r"\b(?:in\s+detail|detailed|comprehensive|thorough|elaborate|expand)\b",
     re.IGNORECASE,
 )
+_FOLLOW_UP_REFERENCE = r"(?:it|that|this|these|the above|the previous answer|them|those)"
+_FOLLOW_UP_PATTERNS = (
+    (
+        "simplify",
+        re.compile(
+            rf"\b(?:explain|describe)\s+{_FOLLOW_UP_REFERENCE}\b.*\b(?:simple|simply|easier|plain language)\b|"
+            rf"\bmake\s+{_FOLLOW_UP_REFERENCE}\s+(?:simpler|easier)\b|"
+            r"^(?:simpler|more simply|in simple terms)[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "detail",
+        re.compile(
+            rf"\b(?:explain|describe)\s+{_FOLLOW_UP_REFERENCE}\b.*\b(?:more detail|further|greater detail)\b|"
+            rf"\b(?:elaborate on|tell me more about)\s+{_FOLLOW_UP_REFERENCE}\b|"
+            rf"\bmake\s+{_FOLLOW_UP_REFERENCE}\s+more detailed\b|"
+            r"^(?:more detail|tell me more|go deeper|elaborate)[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "example",
+        re.compile(
+            r"\b(?:give|show|provide)\s+(?:me\s+)?(?:(?:a|an)\s+)?"
+            r"(?:(?:real[- ]world|practical|concrete)\s+)?example\b|"
+            r"^(?:another\s+)?(?:an?\s+)?example(?:\s+please)?[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "summarize",
+        re.compile(
+            rf"\b(?:summari[sz]e|sum up)\s+{_FOLLOW_UP_REFERENCE}\b|"
+            r"^(?:summari[sz]e|sum up)(?:\s+that)?[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "compare",
+        re.compile(
+            rf"\bcompare\s+{_FOLLOW_UP_REFERENCE}\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "rephrase",
+        re.compile(
+            rf"\b(?:rephrase|reword|say)\s+{_FOLLOW_UP_REFERENCE}\b|"
+            rf"\b(?:say|explain)\s+{_FOLLOW_UP_REFERENCE}\s+again\b|"
+            r"^(?:rephrase|reword|say that again|explain again)(?:\s+please)?[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "continue",
+        re.compile(
+            rf"\bcontinue\s+(?:from|with)\s+(?:there|{_FOLLOW_UP_REFERENCE})\b|"
+            r"^(?:continue|go on|keep going|carry on)(?:\s+please)?[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "shorten",
+        re.compile(
+            rf"\b(?:shorten|condense)\s+{_FOLLOW_UP_REFERENCE}\b|"
+            rf"\bmake\s+{_FOLLOW_UP_REFERENCE}\s+shorter\b|"
+            r"^shorter(?:\s+please)?[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "expand",
+        re.compile(
+            rf"\b(?:expand on|elaborate on)\s+{_FOLLOW_UP_REFERENCE}\b|"
+            rf"\bexpand\s+{_FOLLOW_UP_REFERENCE}\b|"
+            r"^(?:expand|elaborate)[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "step_by_step",
+        re.compile(
+            rf"\b(?:explain|walk me through|break down)\s+{_FOLLOW_UP_REFERENCE}\b.*\bstep[- ]by[- ]step\b|"
+            rf"\bbreak\s+{_FOLLOW_UP_REFERENCE}\s+down\b|"
+            r"^(?:step[- ]by[- ]step|break it down)[.!?]*$",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_FOLLOW_UP_INSTRUCTIONS = {
+    "simplify": "Use plain language and one helpful analogy only if it clarifies the same subject.",
+    "detail": "Add relevant detail without repeating what is already clear.",
+    "example": "Give a concrete example of the subject just explained and connect it to the concept.",
+    "summarize": "Summarize the prior answer and honor any requested length exactly.",
+    "compare": "Compare the referenced subjects; ask briefly if a required comparison subject is missing.",
+    "rephrase": "Reword the prior answer without changing its factual meaning.",
+    "continue": "Continue from the prior answer without restarting or repeating completed points.",
+    "shorten": "Shorten the prior answer while preserving its key meaning.",
+    "expand": "Add useful detail to the prior answer without padding or repetition.",
+    "step_by_step": "Explain the same subject in clear steps while preserving its meaning.",
+}
 _CODE_REQUEST_RE = re.compile(
     r"\b(?:write|create|generate|debug|implement|fix)\b.{0,48}\b(?:code|program|script|function|class)\b",
     re.IGNORECASE,
@@ -83,6 +185,49 @@ def requested_answer_format_instruction(message: str) -> str | None:
     if not instructions:
         return None
     return " ".join(instructions)
+
+
+def follow_up_kind(message: str) -> str | None:
+    """Recognize common elliptical requests that depend on the prior exchange."""
+    text = " ".join(str(message or "").strip().split())
+    if not text:
+        return None
+
+    for kind, pattern in _FOLLOW_UP_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        if kind == "example":
+            target = re.search(r"\bexample\s+(?:of|for)\s+(.+)$", text, re.IGNORECASE)
+            if target and not re.match(_FOLLOW_UP_REFERENCE + r"\b", target.group(1), re.IGNORECASE):
+                continue
+        return kind
+    return None
+
+
+def follow_up_context_instruction(
+    message: str,
+    *,
+    has_prior_exchange: bool,
+) -> str | None:
+    """Return bounded guidance for a contextual follow-up, if applicable."""
+    kind = follow_up_kind(message)
+    if kind is None:
+        return None
+    if not has_prior_exchange:
+        return (
+            "The user's request is a contextual follow-up, but no completed prior "
+            "user-assistant exchange is available. Do not guess its referent; "
+            "ask one concise clarifying question instead of guessing."
+        )
+    return (
+        f"Follow-up intent: {kind}. This refers to the immediately preceding exchange. "
+        "Use that completed user-assistant exchange as the topic, "
+        "preserve its meaning and corrections, and do not inherit an unrelated "
+        "older topic. If more than one referent remains plausible, ask one concise "
+        "question rather than choosing arbitrarily. "
+        f"{_FOLLOW_UP_INSTRUCTIONS[kind]}"
+    )
 
 
 def answer_length_policy(message: str) -> AnswerLengthPolicy | None:
@@ -248,10 +393,10 @@ def answer_simple_request(message: str, *, now: datetime | None = None) -> str |
     if _TIME_RE.fullmatch(text):
         local = now_user_local() if now is None else now.astimezone(now_user_local().tzinfo)
         hour = local.strftime("%I").lstrip("0") or "12"
-        return f"It’s {hour}:{local.minute:02d} {local.strftime('%p')}, Sir."
+        return f"It’s {hour}:{local.minute:02d} {local.strftime('%p')}."
     if _DATE_RE.fullmatch(text):
         local = now_user_local() if now is None else now.astimezone(now_user_local().tzinfo)
-        return f"It’s {local.strftime('%A, %B')} {local.day}, Sir."
+        return f"It’s {local.strftime('%A, %B')} {local.day}."
 
     greeting = _GREETING_REPLIES.get(normalized)
     if greeting:

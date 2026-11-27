@@ -8,9 +8,11 @@ from src.request_timing import (
     llm_finished,
     llm_first_token,
     llm_started,
+    log_stage,
     reset_request_context,
     set_request_context,
     current_request_id,
+    get_timing_summary,
 )
 
 
@@ -30,6 +32,23 @@ def test_llm_timing_is_request_correlated_and_content_free(caplog):
     assert "stage=llm_first_token" in output
     assert "stage=llm_complete" in output
     assert "private prompt" not in output
+
+
+def test_timing_summary_is_bounded_and_excludes_request_data():
+    tokens = set_request_context("private-request-id")
+    try:
+        log_stage("context_build", 12.5)
+    finally:
+        reset_request_context(tokens)
+
+    summary = get_timing_summary()
+    stage = summary["stages"]["context_build"]
+    assert stage["samples"] >= 1
+    assert stage["max_ms"] >= 12.5
+    assert "private-request-id" not in repr(summary)
+    assert "private-user" not in repr(summary)
+    assert "secret prompt" not in repr(summary)
+    assert "window" in summary
 
 
 def test_response_header_timing_preserves_valid_request_id(caplog):

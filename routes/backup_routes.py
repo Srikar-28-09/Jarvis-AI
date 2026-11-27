@@ -7,7 +7,9 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, Response
 from core.middleware import require_admin
 from services.memory import MemoryStoreUnreadable
-from src.auth_helpers import get_current_user
+from src.auth_helpers import get_current_user, require_user
+from src.owner_identity import effective_storage_owner
+from src.owner_identity import auth_disabled
 from src.settings import load_settings, save_settings, load_features, save_features
 
 logger = logging.getLogger(__name__)
@@ -18,24 +20,37 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
 
     @router.get("/api/export")
     async def export_data(request: Request):
-        """Export all user data as a downloadable JSON file."""
-        require_admin(request)
+        """Export only the authenticated user's private data."""
         user = get_current_user(request)
+        if not user:
+            user = require_user(request)
+        user = effective_storage_owner(user)
+        if not user:
+            raise HTTPException(403, "Cannot export without a canonical owner")
 
         # Memories (filtered by owner when auth is enabled)
-        memories = memory_manager.load(owner=user)
+        memories = (
+            memory_manager.load(owner=None)
+            if auth_disabled()
+            else memory_manager.load(owner=user)
+        )
 
-        # Presets (shared across users — export all)
-        presets = preset_manager.get_all()
+        # Presets are explicitly shared. A user export intentionally contains
+        # only private memories, skills, and preferences.
+        presets = {}
 
         # Skills (filtered by owner when auth is enabled)
-        skills = skills_manager.load(owner=user)
+        skills = (
+            skills_manager.load(owner=None)
+            if auth_disabled()
+            else skills_manager.load(owner=user)
+        )
 
         # Settings
-        settings = load_settings()
+        settings = {}
 
         # Feature flags
-        features = load_features()
+        features = {}
 
         # User preferences
         from routes.prefs_routes import _load_for_user
@@ -53,7 +68,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
             "preferences": preferences,
         }
 
-        filename = f"odysseus_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        filename = f"odysseus_user_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         return Response(
             content=json.dumps(export_data, indent=2, ensure_ascii=False),
             media_type="application/json",
@@ -63,8 +78,12 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
     @router.post("/api/import")
     async def import_data(request: Request):
         """Import user data from a previously exported JSON file. Merges with existing data."""
-        require_admin(request)
         user = get_current_user(request)
+        if not user:
+            user = require_user(request)
+        user = effective_storage_owner(user)
+        if not user:
+            raise HTTPException(403, "Cannot import without a canonical owner")
         try:
             body = await request.json()
         except Exception:
@@ -99,8 +118,8 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
                 if mem["text"].strip().lower() in existing_texts:
                     continue  # skip duplicates
                 # Assign owner when auth is enabled
-                if user and not mem.get("owner"):
-                    mem["owner"] = user
+                mem = dict(mem)
+                mem["owner"] = user
                 existing.append(mem)
                 existing_texts.add(mem["text"].strip().lower())
                 added += 1
@@ -140,9 +159,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
                     continue
                 if title.lower() in existing_titles:
                     continue
-                owner = skill.get("owner")
-                if user and not owner:
-                    owner = user
+                owner = user
                 # Skills live on disk as SKILL.md files; the old JSON-era
                 # skills_manager.save() no longer exists. Write each new skill
                 # via add_skill (source="user" skips auto-dedup — this is an
@@ -182,6 +199,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
 
         # ── Presets ──
         if "presets" in body and isinstance(body["presets"], dict):
+            require_admin(request)
             current = preset_manager.get_all()
             for key, value in body["presets"].items():
                 if isinstance(value, dict):
@@ -193,6 +211,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
 
         # ── Settings ──
         if "settings" in body and isinstance(body["settings"], dict):
+            require_admin(request)
             current = load_settings()
             current.update(body["settings"])
             save_settings(current)
@@ -200,6 +219,7 @@ def setup_backup_routes(memory_manager, preset_manager, skills_manager) -> APIRo
 
         # ── Features ──
         if "features" in body and isinstance(body["features"], dict):
+            require_admin(request)
             current = load_features()
             current.update(body["features"])
             save_features(current)

@@ -2289,8 +2289,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
         roundFinalized = false;
         roundFinalization = null;
         isThinking = false;
-        _thinkingMode = null;
-        _cancelThinkingGrace();
         _thinkingAnalysisGate.reset();
         _roundDisplayProjector.reset();
         _replyDisplayProjector.reset();
@@ -2385,14 +2383,9 @@ import { createChatBusyState } from './chatBusyState.mjs';
 
       // Document streaming state (text-fence detection)
       let _docFenceOpened = false;
-      const _thinkingAnalysisGate = createThinkingAnalysisGate({
-        startsWithReasoningPrefix: markdownModule.startsWithReasoningPrefix,
-      });
+      const _thinkingAnalysisGate = createThinkingAnalysisGate();
       const _roundDisplayProjector = createIncrementalDisplayProjector(_streamDisplayText);
       const _replyDisplayProjector = createIncrementalDisplayProjector(_streamDisplayText);
-      let _thinkingMode = null;
-      let _thinkingRecheckAt = 0;
-      let _thinkingGraceTimer = null;
       let _liveThinkSection = null;
       let _liveThinkContent = null;
       let _liveThinkInner = null;
@@ -2423,8 +2416,7 @@ import { createChatBusyState } from './chatBusyState.mjs';
         return text
           .replace(/<\|channel>thought\s*\n?/gi, '')
           .replace(/<\|channel>response\s*\n?/gi, '')
-          .replace(/<channel\|>/gi, '')
-          .replace(/^\s*Thinking(?:\s+Process)?:\s*/i, '');
+          .replace(/<channel\|>/gi, '');
       }
 
       // While thinking is still open, every think tag in the round is noise, so
@@ -2510,7 +2502,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
         if (_liveThinkRenderThrottle) _liveThinkRenderThrottle.cancel();
         _liveThinkRenderThrottle = null;
         _stopLiveThinkTimer();
-        _cancelThinkingGrace();
       };
 
       function _finalizeLiveThinking(text, rich = true) {
@@ -2538,8 +2529,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
       _endThinkingOnTerminalPath = ({ rich = true } = {}) => {
         if (isThinking) {
           isThinking = false;
-          _thinkingMode = null;
-          _thinkingRecheckAt = 0;
           _finalizeLiveThinking(_closedThinkingText(roundText), rich);
         } else {
           _cancelLiveThinkingWork();
@@ -2550,8 +2539,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
       // normal </think> transition (tool_start, agent_step, [DONE], errors).
       function _endLiveThinkingSection({ rich = true } = {}) {
         isThinking = false;
-        _thinkingMode = null;
-        _thinkingRecheckAt = 0;
         _finalizeLiveThinking(_closedThinkingText(roundText), rich);
         const elapsed = thinkingStartTime ? ((Date.now() - thinkingStartTime) / 1000).toFixed(1) : null;
         if (_liveThinkHeader) _liveThinkHeader.textContent = 'View thinking process';
@@ -2559,17 +2546,9 @@ import { createChatBusyState } from './chatBusyState.mjs';
         if (_liveThinkSpinnerSlot) _liveThinkSpinnerSlot.remove();
       }
 
-      function _cancelThinkingGrace() {
-        if (_thinkingGraceTimer !== null) clearTimeout(_thinkingGraceTimer);
-        _thinkingGraceTimer = null;
-        _thinkingRecheckAt = 0;
-      }
-
       function _finishLiveThinkingTransition() {
         if (!isThinking) return;
         isThinking = false;
-        _thinkingMode = null;
-        _cancelThinkingGrace();
         const closedText = _closedThinkingText(roundText);
         const thinkTextLen = closedText.trim().length;
         _finalizeLiveThinking(closedText, thinkTextLen >= 20);
@@ -2626,16 +2605,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
         _renderStream();
       }
 
-      function _scheduleThinkingGrace() {
-        if (_thinkingGraceTimer !== null || !_thinkingRecheckAt) return;
-        const delay = Math.max(0, _thinkingRecheckAt - Date.now());
-        _thinkingGraceTimer = setTimeout(() => {
-          _thinkingGraceTimer = null;
-          if (!isThinking || !roundHolder?.isConnected || abortCtrl?.signal?.aborted) return;
-          _finishLiveThinkingTransition();
-        }, delay);
-      }
-
       // Terminal paths replace the whole round, so they should perform exactly
       // one rich markdown render instead of richly finalizing thinking, then
       // rendering the reply, then replacing both again.
@@ -2690,7 +2659,7 @@ import { createChatBusyState } from './chatBusyState.mjs';
         // If thinking was already collapsed in-place, only render the reply portion
         let liveReply = contentEl.querySelector('.live-reply-content');
         if (liveReply) {
-          // Extract reply text — handle native <think> tags and non-tag patterns
+          // Extract reply text from explicit model thought markup only.
           let replyTrimmed = replyText === null ? '' : String(replyText);
           if (replyText === null) {
             const dt = markdownModule.normalizeThinkingMarkup(_streamDisplayText(roundText));
@@ -2700,32 +2669,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
               : markdownModule.extractThinkingBlocks(dt);
             if (thinkingBlocks.length) {
               replyTrimmed = (extractedReply || '').trim();
-            } else {
-            // Non-tag: check for garbled <think> (reasoning\n<think>reply)
-            const _gm = dt.match(/^[\s\S]+?<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>\s*([\s\S]*?)(?:<\/(?:think(?:ing)?|thought)>)?\s*$/i);
-            if (_gm && _gm[1].trim()) {
-              replyTrimmed = _gm[1].trim();
-            } else {
-              // Pure non-tag: find reply boundary
-              const _rPrefixes = markdownModule.startsWithReasoningPrefix;
-              const _rpStarts = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-              const _rt = (extractedReply || '').trimStart();
-              if (_rPrefixes(_rt)) {
-                const _rLines = _rt.split('\n');
-                for (let _ri = 1; _ri < _rLines.length; _ri++) {
-                  const _rl = _rLines[_ri].trim();
-                  if (!_rl) continue;
-                  if (_rpStarts.some(rp => _rl.startsWith(rp))) { replyTrimmed = _rLines.slice(_ri).join('\n'); break; }
-                }
-                if (!replyTrimmed) {
-                  for (const rp of _rpStarts) {
-                    const rx = new RegExp('[.!?]\\s*(' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')');
-                    const m = rx.exec(_rt);
-                    if (m && m.index > 20) { replyTrimmed = _rt.slice(m.index + 1).trim(); break; }
-                  }
-                }
-              }
-            }
             }
           }
           if (replyText === null) {
@@ -3010,15 +2953,9 @@ import { createChatBusyState } from './chatBusyState.mjs';
                 // Detect thinking-in-progress:
                 // 1. Normal: <think>...no closing tag yet
                 // 2. Malformed: <think></think>\n...text but no second </think> yet
-                // 3. Qwen3.5: "Thinking Process:" without <think> tags
-                // Most deltas cannot change thinking state. Analyze cumulative
-                // text only for a fresh tag/channel/reply boundary, an initial
-                // reasoning prefix, or an expired false-close grace period.
-                if (!_thinkingAnalysisGate.shouldAnalyze(roundText, {
-                  isThinking,
-                  nonTagThinking: _thinkingMode === 'prefix',
-                  recheckAt: _thinkingRecheckAt,
-                })) {
+                // Most deltas cannot change thinking state; inspect cumulative
+                // text only when an explicit thought marker appears.
+                if (!_thinkingAnalysisGate.shouldAnalyze(roundText)) {
                   if (isThinking) {
                     _queueLiveThinking(roundText);
                   } else {
@@ -3037,68 +2974,10 @@ import { createChatBusyState } from './chatBusyState.mjs';
                 }
                 const normalizedRoundText = markdownModule.normalizeThinkingMarkup(roundText);
                 let hasUnclosedThink = markdownModule.hasUnclosedThinkTag(normalizedRoundText);
-                // Detect non-tag thinking patterns: "Thinking:", "Thinking Process:", Gemma-style reasoning
-                // These patterns don't use <think> tags, so we simulate unclosed thinking during streaming
-                const _replyPrefixes = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-                if (!hasUnclosedThink && !/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)) {
-                  const _trimmedRT = normalizedRoundText.trimStart();
-                  const _isReasoning = markdownModule.startsWithReasoningPrefix(_trimmedRT);
-                  if (_isReasoning) {
-                    // Check if we can see a reply boundary yet (newline then reply pattern)
-                    const _lines = _trimmedRT.split('\n');
-                    let _replyFound = false;
-                    for (let li = 1; li < _lines.length; li++) {
-                      const _l = _lines[li].trim();
-                      if (!_l) continue;
-                      if (_replyPrefixes.some(rp => _l.startsWith(rp))) {
-                        _replyFound = true;
-                        break;
-                      }
-                    }
-                    if (!_replyFound) {
-                      // Also check within-line: "reasoning text.Reply text"
-                      const _inlineReply = _replyPrefixes.some(rp => {
-                        const rx = new RegExp('[.!?]\\s*' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-                        const m = rx.exec(_trimmedRT);
-                        return m && m.index > 20;
-                      });
-                      if (!_inlineReply) hasUnclosedThink = true;
-                    }
-                  }
-                }
-                // Detect false close: <think>short</think> where real thinking follows untagged
-                // Do NOT require a prior unclosed delta: providers can emit the
-                // short open+close and leaked reasoning in one chunk.
-                let _falseCloseDeadline = 0;
-                if (!hasUnclosedThink) {
-                  const _thinkMatch = normalizedRoundText.match(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i);
-                  const _thinkLen = _thinkMatch ? _thinkMatch[1].trim().length : 0;
-                  if (_thinkMatch && _thinkLen < 20) {
-                    const _afterClose = normalizedRoundText.replace(/<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:think(?:ing)?|thought)>/i, '').trim();
-                    // Only keep waiting if there's trailing text that looks like thinking (not tool calls)
-                    const _hasToolCall = /```(?:bash|python|web_search|read_file|write_file|create_document|edit_document|manage_|generate_image)/i.test(_afterClose);
-                    const _hasOrphanClose = /<\/(?:think(?:ing)?|thought)>/i.test(_afterClose);
-                    const _falseCloseStart = thinkingStartTime || Date.now();
-                    if (_afterClose && !_hasToolCall && !_hasOrphanClose && (Date.now() - _falseCloseStart) < 500) {
-                      hasUnclosedThink = true;
-                      _falseCloseDeadline = _falseCloseStart + 500;
-                      if (isThinking) {
-                        _thinkingRecheckAt = _falseCloseDeadline;
-                        _scheduleThinkingGrace();
-                      }
-                    } else if (isThinking) {
-                      _cancelThinkingGrace();
-                    }
-                  }
-                }
 
                 if (hasUnclosedThink && !isThinking) {
                   isThinking = true;
-                  _thinkingMode = /<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>|<\|channel>thought/i.test(normalizedRoundText)
-                    ? 'tag'
-                    : 'prefix';
                   thinkingStartTime = Date.now();
-                  _thinkingRecheckAt = _falseCloseDeadline || 0;
                   if (spinner && spinner.element) spinner.destroy();
 
                   // Create a live thinking box — starts expanded so content streams visibly
@@ -3137,7 +3016,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
                     _wp.element.style.transform = 'translateY(-1px)'; // align the whirlpool with the header text
                     _liveThinkSpinnerSlot.appendChild(_wp.element);
                   }
-                  if (_thinkingRecheckAt) _scheduleThinkingGrace();
                 } else if (hasUnclosedThink && isThinking) {
                   _queueLiveThinking(roundText);
                   continue;
@@ -3919,8 +3797,6 @@ import { createChatBusyState } from './chatBusyState.mjs';
                 roundFinalization = null;
                 isThinking = false;
                 roundReplyText = null;
-                _thinkingMode = null;
-                _thinkingRecheckAt = 0;
                 _thinkingAnalysisGate.reset();
                 _roundDisplayProjector.reset();
                 _replyDisplayProjector.reset();
@@ -4159,36 +4035,8 @@ import { createChatBusyState } from './chatBusyState.mjs';
           var _extracted = _liveReplyEl ? markdownModule.extractThinkingBlocks(finalDisplay) : null;
           var _finalReply = '';
           if (_liveReplyEl) {
-            // Try standard extraction first (for native <think> tags)
             if (_extracted?.thinkingBlocks?.length) {
               _finalReply = (_extracted.content || '').trim();
-            } else {
-              // Non-tag thinking: extract reply from raw text
-              // Handle garbled thinking tag: "Thinking: reasoning\n<think>reply"
-              const _garbledMatch = finalDisplay.match(/^[\s\S]+?<(?:think(?:ing)?|thought)(?:\s+[^>]*)?>\s*([\s\S]*?)(?:<\/(?:think(?:ing)?|thought)>)?\s*$/i);
-              if (_garbledMatch && _garbledMatch[1].trim()) {
-                _finalReply = _garbledMatch[1].trim();
-              } else {
-                // Pure non-tag: find reply boundary by prefix patterns
-                const _rs2 = ['Hey', 'Hi ', 'Hi!', 'Hello', 'Sure', 'Yes', 'No ', 'No,', 'Yo', 'OK', 'Here', 'Absolutely', 'Of course', 'Great', 'Alright', 'Thanks', 'Welcome', 'Good ', "I'm happy", "I'd be"];
-                const _fr = (finalDisplay || '').trimStart();
-                if (markdownModule.startsWithReasoningPrefix(_fr)) {
-                  const _fLines = _fr.split('\n');
-                  for (let _fi = 1; _fi < _fLines.length; _fi++) {
-                    const _fl = _fLines[_fi].trim();
-                    if (!_fl) continue;
-                    if (_rs2.some(rp => _fl.startsWith(rp))) { _finalReply = _fLines.slice(_fi).join('\n'); break; }
-                  }
-                  // Within-line check
-                  if (!_finalReply) {
-                    for (const rp of _rs2) {
-                      const rx = new RegExp('[.!?]\\s*(' + rp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')');
-                      const m = rx.exec(_fr);
-                      if (m && m.index > 20) { _finalReply = _fr.slice(m.index + 1).trim(); break; }
-                    }
-                  }
-                }
-              }
             }
           }
           if (_liveReplyEl && _finalReply) {
