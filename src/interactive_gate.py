@@ -32,11 +32,11 @@ def _quiet_seconds() -> float:
 
 
 def _max_wait_seconds() -> float:
-    """0 means wait indefinitely until the UI is quiet."""
+    """Bound the foreground wait unless an operator explicitly opts into 0."""
     try:
-        return max(0.0, float(os.getenv("BACKGROUND_TASK_MAX_WAIT_SECONDS", "0")))
+        return max(0.0, float(os.getenv("BACKGROUND_TASK_MAX_WAIT_SECONDS", "30")))
     except Exception:
-        return 0.0
+        return 30.0
 
 
 def _browser_active_seconds() -> float:

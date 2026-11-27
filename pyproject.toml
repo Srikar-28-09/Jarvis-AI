@@ -1,6 +1,7 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 # Test-taxonomy markers added at collection time by tests/conftest.py. The
 # stable area_* markers are declared here; the dynamic sub_<filename-token>
 # markers are registered before collection by pytest_configure in
