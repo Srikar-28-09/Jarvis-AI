@@ -71,6 +71,24 @@ def test_default_compose_files_do_not_mount_host_docker_socket():
         assert "/var/run/docker.sock" not in text, path.name
 
 
+def test_realesrgan_builder_download_is_retried_timed_and_checksum_verified():
+    script = (ROOT / "docker" / "build-realesrgan-wheels.sh").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY docker/build-realesrgan-wheels.sh /usr/local/bin/build-realesrgan-wheels.sh" in dockerfile
+    assert "RUN bash /usr/local/bin/build-realesrgan-wheels.sh /wheels" in dockerfile
+    assert "--retry \"$CURL_RETRY_COUNT\"" in script
+    assert "--retry-all-errors" in script
+    assert "--retry-delay 2" in script
+    assert "--connect-timeout \"$CURL_CONNECT_TIMEOUT\"" in script
+    assert "--retry-max-time \"$CURL_RETRY_MAX_TIME\"" in script
+    assert "--max-time \"$CURL_API_MAX_TIME\"" in script
+    assert "--max-time \"$CURL_ARTIFACT_MAX_TIME\"" in script
+    assert '(artifact.get("digests") or {}).get("sha256")' in script
+    assert "sha256sum --check --strict -" in script
+    assert "SHA-256 verification failed" in script
+
+
 def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
     overlay = yaml.safe_load(HOST_DOCKER_OVERLAY.read_text(encoding="utf-8"))
     service = overlay["services"]["odysseus"]
